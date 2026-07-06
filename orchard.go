@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"flag"
 	"fmt"
 	"os"
@@ -69,6 +70,74 @@ func readConfig(filename string) (*Config, error) {
 	return cfg, nil
 }
 
+type gitWorktree struct {
+	Path string
+}
+
+type gitClient interface {
+	WorktreeExists(rootTree, plantDir, name string) (bool, error)
+	BranchExists(rootTree string, branchName string) (bool, error)
+}
+
+type cliGitClient struct{}
+
+func (g cliGitClient) listWorktrees(rootTree string) ([]gitWorktree, error) {
+	cmd := exec.Command("git", "worktree", "list", "--porcelain")
+	cmd.Dir = rootTree
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	return parseWorktrees(output)
+}
+
+func (g cliGitClient) WorktreeExists(rootTree, plantDir, name string) (bool, error) {
+	worktrees, err := g.listWorktrees(rootTree)
+	if err != nil {
+		return false, err
+	}
+	return worktreeExists(worktrees, plantDir, name), nil
+}
+
+func (g cliGitClient) BranchExists(rootTree string, branchName string) (bool, error) {
+	cmd := exec.Command("git", "show-ref", "--verify", "refs/heads/"+branchName)
+	cmd.Dir = rootTree
+	err := cmd.Run()
+	if err != nil {
+		if _, ok := err.(*exec.ExitError); ok {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func parseWorktrees(output []byte) ([]gitWorktree, error) {
+	var worktrees []gitWorktree
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "worktree ") {
+			wtPath := filepath.Clean(strings.TrimPrefix(line, "worktree "))
+			worktrees = append(worktrees, gitWorktree{Path: wtPath})
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return worktrees, nil
+}
+
+func worktreeExists(worktrees []gitWorktree, plantDir, name string) bool {
+	targetPath := filepath.Clean(filepath.Join(plantDir, name))
+	for _, wt := range worktrees {
+		if wt.Path == targetPath {
+			return true
+		}
+	}
+	return false
+}
+
 func runCmd(dir, name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
@@ -119,6 +188,29 @@ func main() {
 	}
 
 	fmt.Printf("Loaded config: root_tree=%s, plant_dir=%s\n", cfg.RootTree, cfg.PlantDir)
+
+	client := cliGitClient{}
+	exists, err := client.WorktreeExists(cfg.RootTree, cfg.PlantDir, worktreeName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error checking if worktree exists: %v\n", err)
+		os.Exit(1)
+	}
+	if exists {
+		fmt.Fprintf(os.Stderr, "Error: worktree %q already exists\n", worktreeName)
+		os.Exit(1)
+	}
+
+	if baseBranch == "" {
+		branchExists, err := client.BranchExists(cfg.RootTree, worktreeName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error checking if branch exists: %v\n", err)
+			os.Exit(1)
+		}
+		if branchExists {
+			fmt.Fprintf(os.Stderr, "Error: branch %q already exists\n", worktreeName)
+			os.Exit(1)
+		}
+	}
 
 	// 1. Git update root_tree
 	fmt.Println("Updating root repository...")
