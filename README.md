@@ -53,6 +53,14 @@ Creates a new worktree.
 orchard [-config <config_path>] add <worktree_name> [<base_branch_or_commit>]
 ```
 
+#### remove
+
+Removes a worktree and its associated branch.
+
+```bash
+orchard [-config <config_path>] remove <worktree_name>
+```
+
 ### Examples
 
 - **Create a worktree with a new branch**:
@@ -65,6 +73,12 @@ orchard [-config <config_path>] add <worktree_name> [<base_branch_or_commit>]
   Creates a new worktree checking out the existing `main` branch.
   ```bash
   orchard add my-main-worktree main
+  ```
+
+- **Remove a worktree and its branch**:
+  Removes the worktree named `my-feature` and deletes the corresponding branch `my-feature` from the root repository.
+  ```bash
+  orchard remove my-feature
   ```
 
 - **Use a custom configuration file**:
