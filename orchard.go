@@ -153,7 +153,30 @@ func main() {
 
 	args := flag.Args()
 	if len(args) < 1 {
-		fmt.Println("Usage: orchard [-config <config_path>] <worktree_name> [<base_branch_or_commit>]")
+		printUsage()
+		os.Exit(1)
+	}
+
+	subcommand := args[0]
+	switch subcommand {
+	case "add":
+		handleAdd(args[1:], *configPath)
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown subcommand: %s\n", subcommand)
+		printUsage()
+		os.Exit(1)
+	}
+}
+
+func printUsage() {
+	fmt.Println("Usage: orchard [-config <config_path>] <subcommand> [args]")
+	fmt.Println("Subcommands:")
+	fmt.Println("  add <worktree_name> [<base_branch_or_commit>]   Create a new worktree")
+}
+
+func handleAdd(args []string, configPath string) {
+	if len(args) < 1 {
+		fmt.Println("Usage: orchard [-config <config_path>] add <worktree_name> [<base_branch_or_commit>]")
 		os.Exit(1)
 	}
 
@@ -163,7 +186,7 @@ func main() {
 		baseBranch = args[1]
 	}
 
-	actualConfigPath := *configPath
+	actualConfigPath := configPath
 	if actualConfigPath == "" {
 		if _, err := os.Stat("orchard.conf"); err == nil {
 			actualConfigPath = "orchard.conf"

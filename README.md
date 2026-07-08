@@ -40,7 +40,17 @@ plant_dir = /absolute/path/to/plant/directory
 ## Usage
 
 ```bash
-orchard [-config <config_path>] <worktree_name> [<base_branch_or_commit>]
+orchard [-config <config_path>] <subcommand> [args]
+```
+
+### Subcommands
+
+#### add
+
+Creates a new worktree.
+
+```bash
+orchard [-config <config_path>] add <worktree_name> [<base_branch_or_commit>]
 ```
 
 ### Examples
@@ -48,16 +58,16 @@ orchard [-config <config_path>] <worktree_name> [<base_branch_or_commit>]
 - **Create a worktree with a new branch**:
   Creates a new worktree and branch named `my-new-feature` based on the root repository's current HEAD.
   ```bash
-  orchard my-new-feature
+  orchard add my-new-feature
   ```
 
 - **Create a worktree based on an existing branch**:
   Creates a new worktree checking out the existing `main` branch.
   ```bash
-  orchard my-main-worktree main
+  orchard add my-main-worktree main
   ```
 
 - **Use a custom configuration file**:
   ```bash
-  orchard -config /path/to/custom.conf my-feature
+  orchard -config /path/to/custom.conf add my-feature
   ```
