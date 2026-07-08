@@ -161,6 +161,8 @@ func main() {
 	switch subcommand {
 	case "add":
 		handleAdd(args[1:], *configPath)
+	case "remove":
+		handleRemove(args[1:], *configPath)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown subcommand: %s\n", subcommand)
 		printUsage()
@@ -172,20 +174,11 @@ func printUsage() {
 	fmt.Println("Usage: orchard [-config <config_path>] <subcommand> [args]")
 	fmt.Println("Subcommands:")
 	fmt.Println("  add <worktree_name> [<base_branch_or_commit>]   Create a new worktree")
+	fmt.Println("  remove <worktree_name>                           Remove a worktree and its branch")
 }
 
-func handleAdd(args []string, configPath string) {
-	if len(args) < 1 {
-		fmt.Println("Usage: orchard [-config <config_path>] add <worktree_name> [<base_branch_or_commit>]")
-		os.Exit(1)
-	}
 
-	worktreeName := args[0]
-	var baseBranch string
-	if len(args) > 1 {
-		baseBranch = args[1]
-	}
-
+func resolveConfig(configPath string) (*Config, error) {
 	actualConfigPath := configPath
 	if actualConfigPath == "" {
 		if _, err := os.Stat("orchard.conf"); err == nil {
@@ -206,7 +199,26 @@ func handleAdd(args []string, configPath string) {
 
 	cfg, err := readConfig(actualConfigPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading config (path: %s): %v\n", actualConfigPath, err)
+		return nil, fmt.Errorf("path %s: %w", actualConfigPath, err)
+	}
+	return cfg, nil
+}
+
+func handleAdd(args []string, configPath string) {
+	if len(args) < 1 {
+		fmt.Println("Usage: orchard [-config <config_path>] add <worktree_name> [<base_branch_or_commit>]")
+		os.Exit(1)
+	}
+
+	worktreeName := args[0]
+	var baseBranch string
+	if len(args) > 1 {
+		baseBranch = args[1]
+	}
+
+	cfg, err := resolveConfig(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading config: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -270,6 +282,61 @@ func handleAdd(args []string, configPath string) {
 	fmt.Println("Initializing submodules in the new worktree...")
 	if err := runCmd(newWorktreePath, "git", "submodule", "update", "--init", "--recursive"); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize submodules in the new worktree: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Success!")
+}
+
+func handleRemove(args []string, configPath string) {
+	if len(args) < 1 {
+		fmt.Println("Usage: orchard [-config <config_path>] remove <worktree_name>")
+		os.Exit(1)
+	}
+
+	worktreeName := args[0]
+
+	cfg, err := resolveConfig(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading config: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Loaded config: root_tree=%s, plant_dir=%s\n", cfg.RootTree, cfg.PlantDir)
+
+	client := cliGitClient{}
+	exists, err := client.WorktreeExists(cfg.RootTree, cfg.PlantDir, worktreeName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error checking if worktree exists: %v\n", err)
+		os.Exit(1)
+	}
+	if !exists {
+		fmt.Fprintf(os.Stderr, "Error: worktree %q does not exist\n", worktreeName)
+		os.Exit(1)
+	}
+
+	branchExists, err := client.BranchExists(cfg.RootTree, worktreeName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error checking if branch exists: %v\n", err)
+		os.Exit(1)
+	}
+	if !branchExists {
+		fmt.Fprintf(os.Stderr, "Error: branch %q does not exist\n", worktreeName)
+		os.Exit(1)
+	}
+
+	// 1. Remove the worktree
+	worktreePath := filepath.Join(cfg.PlantDir, worktreeName)
+	fmt.Printf("Removing worktree at %s...\n", worktreePath)
+	if err := runCmd(cfg.RootTree, "git", "worktree", "remove", "--force", worktreePath); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to remove worktree: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 2. Delete the branch
+	fmt.Printf("Deleting branch %s...\n", worktreeName)
+	if err := runCmd(cfg.RootTree, "git", "branch", "-D", worktreeName); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to delete branch: %v\n", err)
 		os.Exit(1)
 	}
 
