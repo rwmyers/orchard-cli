@@ -55,10 +55,10 @@ orchard [--config <config_path>] add <worktree_name> [<base_branch_or_commit>]
 
 #### remove
 
-Removes a worktree and its associated branch.
+Removes one or more worktrees and their associated branches. All names are validated before anything is removed.
 
 ```bash
-orchard [--config <config_path>] remove <worktree_name>
+orchard [--config <config_path>] remove <worktree_name>...
 ```
 
 #### root
@@ -95,6 +95,12 @@ orchard [--config <config_path>] list
   Removes the worktree named `my-feature` and deletes the corresponding branch `my-feature` from the root repository.
   ```bash
   orchard remove my-feature
+  ```
+
+- **Remove several worktrees at once**:
+  Removes each named worktree and its branch in turn.
+  ```bash
+  orchard remove my-feature other-feature
   ```
 
 - **List planted worktrees**:
