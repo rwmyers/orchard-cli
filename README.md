@@ -69,6 +69,14 @@ Prints the path of the root tree (`root_tree`) resolved from the configuration, 
 orchard [--config <config_path>] root
 ```
 
+#### list
+
+Lists the worktrees planted in the plant directory (`plant_dir`), one per line as `name<TAB>path`. The root tree itself is not included.
+
+```bash
+orchard [--config <config_path>] list
+```
+
 ### Examples
 
 - **Create a worktree with a new branch**:
@@ -87,6 +95,12 @@ orchard [--config <config_path>] root
   Removes the worktree named `my-feature` and deletes the corresponding branch `my-feature` from the root repository.
   ```bash
   orchard remove my-feature
+  ```
+
+- **List planted worktrees**:
+  Shows the name and path of each worktree in the plant directory.
+  ```bash
+  orchard list
   ```
 
 - **Return to the root of the orchard**:
