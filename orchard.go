@@ -158,6 +158,8 @@ func main() {
 		handleAdd(args[1:], *configPath)
 	case "remove":
 		handleRemove(args[1:], *configPath)
+	case "root":
+		handleRoot(*configPath)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown subcommand: %s\n", subcommand)
 		printUsage()
@@ -170,6 +172,7 @@ func printUsage() {
 	fmt.Println("Subcommands:")
 	fmt.Println("  add <worktree_name> [<base_branch_or_commit>]   Create a new worktree")
 	fmt.Println("  remove <worktree_name>                           Remove a worktree and its branch")
+	fmt.Println("  root                                             Print the root tree path")
 }
 
 func resolveConfig(configPath string) (*Config, error) {
@@ -196,6 +199,18 @@ func resolveConfig(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("path %s: %w", actualConfigPath, err)
 	}
 	return cfg, nil
+}
+
+func handleRoot(configPath string) {
+	cfg, err := resolveConfig(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading config: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Print only the path so the output can be used in command
+	// substitution, e.g. cd "$(orchard root)".
+	fmt.Println(cfg.RootTree)
 }
 
 func handleAdd(args []string, configPath string) {
