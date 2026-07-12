@@ -21,7 +21,7 @@ Make sure your shell's `PATH` includes `~/go/bin` to run it globally.
 
 Orchard resolves its configuration in the following order of precedence:
 
-1. **Explicit Flag**: Specifying `-config <path>` on the CLI.
+1. **Explicit Flag**: Specifying `--config <path>` (or `-c <path>`) on the CLI.
 2. **Local Configuration**: An `orchard.conf` file present in the directory where the command is executed.
 3. **Global Configuration**: A fallback configuration file located at `~/.config/orchard/orchard.conf`.
 
@@ -40,7 +40,7 @@ plant_dir = /absolute/path/to/plant/directory
 ## Usage
 
 ```bash
-orchard [-config <config_path>] <subcommand> [args]
+orchard [--config <config_path>] <subcommand> [args]
 ```
 
 ### Subcommands
@@ -50,7 +50,7 @@ orchard [-config <config_path>] <subcommand> [args]
 Creates a new worktree.
 
 ```bash
-orchard [-config <config_path>] add <worktree_name> [<base_branch_or_commit>]
+orchard [--config <config_path>] add <worktree_name> [<base_branch_or_commit>]
 ```
 
 #### remove
@@ -58,7 +58,7 @@ orchard [-config <config_path>] add <worktree_name> [<base_branch_or_commit>]
 Removes a worktree and its associated branch.
 
 ```bash
-orchard [-config <config_path>] remove <worktree_name>
+orchard [--config <config_path>] remove <worktree_name>
 ```
 
 #### root
@@ -66,7 +66,7 @@ orchard [-config <config_path>] remove <worktree_name>
 Prints the path of the root tree (`root_tree`) resolved from the configuration, making it easy to return to the root of the orchard from anywhere.
 
 ```bash
-orchard [-config <config_path>] root
+orchard [--config <config_path>] root
 ```
 
 ### Examples
@@ -96,8 +96,9 @@ orchard [-config <config_path>] root
   ```
 
 - **Use a custom configuration file**:
+  The `--config` flag may appear anywhere on the command line, before or after the subcommand.
   ```bash
-  orchard -config /path/to/custom.conf add my-feature
+  orchard add my-feature --config /path/to/custom.conf
   ```
 
 ## Development

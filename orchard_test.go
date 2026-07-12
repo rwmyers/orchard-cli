@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"reflect"
 	"testing"
 )
@@ -102,6 +103,37 @@ prunable gitdir file points to non-existent location
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("parseWorktrees() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestArgValidation(t *testing.T) {
+	// Arg validation runs before RunE, so no config file is needed for the
+	// error cases below.
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr bool
+	}{
+		{name: "add with no args", args: []string{"add"}, wantErr: true},
+		{name: "add with too many args", args: []string{"add", "wt1", "main", "extra"}, wantErr: true},
+		{name: "remove with no args", args: []string{"remove"}, wantErr: true},
+		{name: "remove with too many args", args: []string{"remove", "wt1", "wt2"}, wantErr: true},
+		{name: "root with args", args: []string{"root", "extra"}, wantErr: true},
+		{name: "unknown subcommand", args: []string{"bogus"}, wantErr: true},
+		{name: "help", args: []string{"--help"}, wantErr: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := newRootCmd()
+			cmd.SetArgs(tt.args)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			err := cmd.Execute()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Execute(%v) error = %v, wantErr %v", tt.args, err, tt.wantErr)
 			}
 		})
 	}
