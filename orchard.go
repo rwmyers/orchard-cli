@@ -3,12 +3,13 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/spf13/cobra"
 )
 
 type Config struct {
@@ -143,36 +144,80 @@ func runCmd(dir, name string, args ...string) error {
 }
 
 func main() {
-	configPath := flag.String("config", "", "Path to configuration file")
-	flag.Parse()
-
-	args := flag.Args()
-	if len(args) < 1 {
-		printUsage()
-		os.Exit(1)
-	}
-
-	subcommand := args[0]
-	switch subcommand {
-	case "add":
-		handleAdd(args[1:], *configPath)
-	case "remove":
-		handleRemove(args[1:], *configPath)
-	case "root":
-		handleRoot(*configPath)
-	default:
-		fmt.Fprintf(os.Stderr, "Unknown subcommand: %s\n", subcommand)
-		printUsage()
+	if err := newRootCmd().Execute(); err != nil {
 		os.Exit(1)
 	}
 }
 
-func printUsage() {
-	fmt.Println("Usage: orchard [-config <config_path>] <subcommand> [args]")
-	fmt.Println("Subcommands:")
-	fmt.Println("  add <worktree_name> [<base_branch_or_commit>]   Create a new worktree")
-	fmt.Println("  remove <worktree_name>                           Remove a worktree and its branch")
-	fmt.Println("  root                                             Print the root tree path")
+func newRootCmd() *cobra.Command {
+	var configPath string
+
+	rootCmd := &cobra.Command{
+		Use:   "orchard",
+		Short: "Manage git worktrees based on a designated root repository",
+	}
+	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", "", "path to configuration file")
+
+	// Resolves the config once arg validation has passed. Silences usage so
+	// that runtime failures don't dump help text; arg-validation errors,
+	// which happen before RunE, still show it.
+	loadConfig := func(cmd *cobra.Command) (*Config, error) {
+		cmd.SilenceUsage = true
+		cfg, err := resolveConfig(configPath)
+		if err != nil {
+			return nil, fmt.Errorf("reading config: %w", err)
+		}
+		return cfg, nil
+	}
+
+	addCmd := &cobra.Command{
+		Use:   "add <worktree_name> [<base_branch_or_commit>]",
+		Short: "Create a new worktree",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig(cmd)
+			if err != nil {
+				return err
+			}
+			baseBranch := ""
+			if len(args) > 1 {
+				baseBranch = args[1]
+			}
+			return runAdd(cfg, args[0], baseBranch)
+		},
+	}
+
+	removeCmd := &cobra.Command{
+		Use:   "remove <worktree_name>",
+		Short: "Remove a worktree and its branch",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig(cmd)
+			if err != nil {
+				return err
+			}
+			return runRemove(cfg, args[0])
+		},
+	}
+
+	rootPathCmd := &cobra.Command{
+		Use:   "root",
+		Short: "Print the root tree path",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig(cmd)
+			if err != nil {
+				return err
+			}
+			// Print only the path so the output can be used in command
+			// substitution, e.g. cd "$(orchard root)".
+			fmt.Println(cfg.RootTree)
+			return nil
+		},
+	}
+
+	rootCmd.AddCommand(addCmd, removeCmd, rootPathCmd)
+	return rootCmd
 }
 
 func resolveConfig(configPath string) (*Config, error) {
@@ -201,71 +246,36 @@ func resolveConfig(configPath string) (*Config, error) {
 	return cfg, nil
 }
 
-func handleRoot(configPath string) {
-	cfg, err := resolveConfig(configPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading config: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Print only the path so the output can be used in command
-	// substitution, e.g. cd "$(orchard root)".
-	fmt.Println(cfg.RootTree)
-}
-
-func handleAdd(args []string, configPath string) {
-	if len(args) < 1 {
-		fmt.Println("Usage: orchard [-config <config_path>] add <worktree_name> [<base_branch_or_commit>]")
-		os.Exit(1)
-	}
-
-	worktreeName := args[0]
-	var baseBranch string
-	if len(args) > 1 {
-		baseBranch = args[1]
-	}
-
-	cfg, err := resolveConfig(configPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading config: %v\n", err)
-		os.Exit(1)
-	}
-
+func runAdd(cfg *Config, worktreeName, baseBranch string) error {
 	fmt.Printf("Loaded config: root_tree=%s, plant_dir=%s\n", cfg.RootTree, cfg.PlantDir)
 
 	client := cliGitClient{}
 	exists, err := client.WorktreeExists(cfg.RootTree, cfg.PlantDir, worktreeName)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error checking if worktree exists: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("checking if worktree exists: %w", err)
 	}
 	if exists {
-		fmt.Fprintf(os.Stderr, "Error: worktree %q already exists\n", worktreeName)
-		os.Exit(1)
+		return fmt.Errorf("worktree %q already exists", worktreeName)
 	}
 
 	if baseBranch == "" {
 		branchExists, err := client.BranchExists(cfg.RootTree, worktreeName)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error checking if branch exists: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("checking if branch exists: %w", err)
 		}
 		if branchExists {
-			fmt.Fprintf(os.Stderr, "Error: branch %q already exists\n", worktreeName)
-			os.Exit(1)
+			return fmt.Errorf("branch %q already exists", worktreeName)
 		}
 	}
 
 	// 1. Git update root_tree
 	fmt.Println("Updating root repository...")
 	if err := runCmd(cfg.RootTree, "git", "pull"); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to git pull in root_tree: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to git pull in root_tree: %w", err)
 	}
 
 	if err := runCmd(cfg.RootTree, "git", "submodule", "update", "--init", "--recursive"); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to update submodules in root_tree: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to update submodules in root_tree: %w", err)
 	}
 
 	// 2. Create the new worktree
@@ -283,71 +293,52 @@ func handleAdd(args []string, configPath string) {
 	}
 
 	if err := runCmd(cfg.RootTree, "git", gitArgs...); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create worktree: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create worktree: %w", err)
 	}
 
 	// 3. Initialize submodules in the new worktree
 	fmt.Println("Initializing submodules in the new worktree...")
 	if err := runCmd(newWorktreePath, "git", "submodule", "update", "--init", "--recursive"); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to initialize submodules in the new worktree: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to initialize submodules in the new worktree: %w", err)
 	}
 
 	fmt.Println("Success!")
+	return nil
 }
 
-func handleRemove(args []string, configPath string) {
-	if len(args) < 1 {
-		fmt.Println("Usage: orchard [-config <config_path>] remove <worktree_name>")
-		os.Exit(1)
-	}
-
-	worktreeName := args[0]
-
-	cfg, err := resolveConfig(configPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading config: %v\n", err)
-		os.Exit(1)
-	}
-
+func runRemove(cfg *Config, worktreeName string) error {
 	fmt.Printf("Loaded config: root_tree=%s, plant_dir=%s\n", cfg.RootTree, cfg.PlantDir)
 
 	client := cliGitClient{}
 	exists, err := client.WorktreeExists(cfg.RootTree, cfg.PlantDir, worktreeName)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error checking if worktree exists: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("checking if worktree exists: %w", err)
 	}
 	if !exists {
-		fmt.Fprintf(os.Stderr, "Error: worktree %q does not exist\n", worktreeName)
-		os.Exit(1)
+		return fmt.Errorf("worktree %q does not exist", worktreeName)
 	}
 
 	branchExists, err := client.BranchExists(cfg.RootTree, worktreeName)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error checking if branch exists: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("checking if branch exists: %w", err)
 	}
 	if !branchExists {
-		fmt.Fprintf(os.Stderr, "Error: branch %q does not exist\n", worktreeName)
-		os.Exit(1)
+		return fmt.Errorf("branch %q does not exist", worktreeName)
 	}
 
 	// 1. Remove the worktree
 	worktreePath := filepath.Join(cfg.PlantDir, worktreeName)
 	fmt.Printf("Removing worktree at %s...\n", worktreePath)
 	if err := runCmd(cfg.RootTree, "git", "worktree", "remove", "--force", worktreePath); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to remove worktree: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to remove worktree: %w", err)
 	}
 
 	// 2. Delete the branch
 	fmt.Printf("Deleting branch %s...\n", worktreeName)
 	if err := runCmd(cfg.RootTree, "git", "branch", "-D", worktreeName); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to delete branch: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to delete branch: %w", err)
 	}
 
 	fmt.Println("Success!")
+	return nil
 }
