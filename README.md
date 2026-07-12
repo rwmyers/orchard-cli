@@ -61,6 +61,14 @@ Removes a worktree and its associated branch.
 orchard [-config <config_path>] remove <worktree_name>
 ```
 
+#### root
+
+Prints the path of the root tree (`root_tree`) resolved from the configuration, making it easy to return to the root of the orchard from anywhere.
+
+```bash
+orchard [-config <config_path>] root
+```
+
 ### Examples
 
 - **Create a worktree with a new branch**:
@@ -79,6 +87,12 @@ orchard [-config <config_path>] remove <worktree_name>
   Removes the worktree named `my-feature` and deletes the corresponding branch `my-feature` from the root repository.
   ```bash
   orchard remove my-feature
+  ```
+
+- **Return to the root of the orchard**:
+  Changes the current shell directory to the root repository.
+  ```bash
+  cd "$(orchard root)"
   ```
 
 - **Use a custom configuration file**:
