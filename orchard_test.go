@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -172,7 +173,6 @@ func TestArgValidation(t *testing.T) {
 		{name: "add with no args", args: []string{"add"}, wantErr: true},
 		{name: "add with too many args", args: []string{"add", "wt1", "main", "extra"}, wantErr: true},
 		{name: "remove with no args", args: []string{"remove"}, wantErr: true},
-		{name: "remove with too many args", args: []string{"remove", "wt1", "wt2"}, wantErr: true},
 		{name: "root with args", args: []string{"root", "extra"}, wantErr: true},
 		{name: "list with args", args: []string{"list", "extra"}, wantErr: true},
 		{name: "unknown subcommand", args: []string{"bogus"}, wantErr: true},
@@ -191,4 +191,17 @@ func TestArgValidation(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("remove accepts multiple args", func(t *testing.T) {
+		// A nonexistent config makes RunE fail at config loading, proving
+		// multiple worktree names get past arg validation.
+		cmd := newRootCmd()
+		cmd.SetArgs([]string{"remove", "wt1", "wt2", "--config", "/nonexistent/orchard.conf"})
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		err := cmd.Execute()
+		if err == nil || !strings.Contains(err.Error(), "reading config") {
+			t.Errorf("Execute() error = %v, want config loading error", err)
+		}
+	})
 }

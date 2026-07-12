@@ -206,15 +206,15 @@ func newRootCmd() *cobra.Command {
 	}
 
 	removeCmd := &cobra.Command{
-		Use:   "remove <worktree_name>",
-		Short: "Remove a worktree and its branch",
-		Args:  cobra.ExactArgs(1),
+		Use:   "remove <worktree_name>...",
+		Short: "Remove one or more worktrees and their branches",
+		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := loadConfig(cmd)
 			if err != nil {
 				return err
 			}
-			return runRemove(cfg, args[0])
+			return runRemove(cfg, args)
 		},
 	}
 
@@ -352,37 +352,43 @@ func runList(cfg *Config) error {
 	return nil
 }
 
-func runRemove(cfg *Config, worktreeName string) error {
+func runRemove(cfg *Config, worktreeNames []string) error {
 	fmt.Printf("Loaded config: root_tree=%s, plant_dir=%s\n", cfg.RootTree, cfg.PlantDir)
 
+	// Validate every name before removing anything, so a bad name later in
+	// the list doesn't leave the removal half-done.
 	client := cliGitClient{}
-	exists, err := client.WorktreeExists(cfg.RootTree, cfg.PlantDir, worktreeName)
+	worktrees, err := client.listWorktrees(cfg.RootTree)
 	if err != nil {
-		return fmt.Errorf("checking if worktree exists: %w", err)
+		return fmt.Errorf("listing worktrees: %w", err)
 	}
-	if !exists {
-		return fmt.Errorf("worktree %q does not exist", worktreeName)
+	for _, name := range worktreeNames {
+		if !worktreeExists(worktrees, cfg.PlantDir, name) {
+			return fmt.Errorf("worktree %q does not exist", name)
+		}
+
+		branchExists, err := client.BranchExists(cfg.RootTree, name)
+		if err != nil {
+			return fmt.Errorf("checking if branch exists: %w", err)
+		}
+		if !branchExists {
+			return fmt.Errorf("branch %q does not exist", name)
+		}
 	}
 
-	branchExists, err := client.BranchExists(cfg.RootTree, worktreeName)
-	if err != nil {
-		return fmt.Errorf("checking if branch exists: %w", err)
-	}
-	if !branchExists {
-		return fmt.Errorf("branch %q does not exist", worktreeName)
-	}
+	for _, name := range worktreeNames {
+		// 1. Remove the worktree
+		worktreePath := filepath.Join(cfg.PlantDir, name)
+		fmt.Printf("Removing worktree at %s...\n", worktreePath)
+		if err := runCmd(cfg.RootTree, "git", "worktree", "remove", "--force", worktreePath); err != nil {
+			return fmt.Errorf("failed to remove worktree %q: %w", name, err)
+		}
 
-	// 1. Remove the worktree
-	worktreePath := filepath.Join(cfg.PlantDir, worktreeName)
-	fmt.Printf("Removing worktree at %s...\n", worktreePath)
-	if err := runCmd(cfg.RootTree, "git", "worktree", "remove", "--force", worktreePath); err != nil {
-		return fmt.Errorf("failed to remove worktree: %w", err)
-	}
-
-	// 2. Delete the branch
-	fmt.Printf("Deleting branch %s...\n", worktreeName)
-	if err := runCmd(cfg.RootTree, "git", "branch", "-D", worktreeName); err != nil {
-		return fmt.Errorf("failed to delete branch: %w", err)
+		// 2. Delete the branch
+		fmt.Printf("Deleting branch %s...\n", name)
+		if err := runCmd(cfg.RootTree, "git", "branch", "-D", name); err != nil {
+			return fmt.Errorf("failed to delete branch %q: %w", name, err)
+		}
 	}
 
 	fmt.Println("Success!")
