@@ -21,7 +21,7 @@ func readConfig(filename string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	cfg := &Config{}
 	scanner := bufio.NewScanner(file)
@@ -72,11 +72,6 @@ func readConfig(filename string) (*Config, error) {
 
 type gitWorktree struct {
 	Path string
-}
-
-type gitClient interface {
-	WorktreeExists(rootTree, plantDir, name string) (bool, error)
-	BranchExists(rootTree string, branchName string) (bool, error)
 }
 
 type cliGitClient struct{}
@@ -176,7 +171,6 @@ func printUsage() {
 	fmt.Println("  add <worktree_name> [<base_branch_or_commit>]   Create a new worktree")
 	fmt.Println("  remove <worktree_name>                           Remove a worktree and its branch")
 }
-
 
 func resolveConfig(configPath string) (*Config, error) {
 	actualConfigPath := configPath

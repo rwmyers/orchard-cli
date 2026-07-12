@@ -85,3 +85,23 @@ orchard [-config <config_path>] remove <worktree_name>
   ```bash
   orchard -config /path/to/custom.conf add my-feature
   ```
+
+## Development
+
+Before submitting changes, run the presubmit checks (formatting, vet, and unit tests):
+
+```bash
+make check
+```
+
+Linting uses [golangci-lint](https://golangci-lint.run/), which must be installed separately:
+
+```bash
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+```
+
+Then run it with:
+
+```bash
+make lint
+```
