@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -206,13 +208,16 @@ func newRootCmd() *cobra.Command {
 	}
 
 	removeCmd := &cobra.Command{
-		Use:   "remove <worktree_name>...",
-		Short: "Remove one or more worktrees and their branches",
-		Args:  cobra.MinimumNArgs(1),
+		Use:   "remove [<worktree_name>...]",
+		Short: "Remove worktrees and their branches (pick list when no names are given)",
+		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := loadConfig(cmd)
 			if err != nil {
 				return err
+			}
+			if len(args) == 0 {
+				return runRemoveInteractive(cfg)
 			}
 			return runRemove(cfg, args)
 		},
@@ -350,6 +355,127 @@ func runList(cfg *Config) error {
 		fmt.Printf("%s\t%s\n", wt.Name, wt.Path)
 	}
 	return nil
+}
+
+// pickWorktrees presents a toggle pick list of the planted worktrees and
+// returns the names left selected. Numbers (several per line allowed) toggle
+// entries, 'a' toggles all, an empty line confirms the selection, and 'q' or
+// EOF aborts with no names selected.
+func pickWorktrees(scanner *bufio.Scanner, out io.Writer, planted []plantedWorktree) ([]string, error) {
+	selected := make([]bool, len(planted))
+	_, _ = fmt.Fprintln(out, "Select worktrees to remove (numbers toggle, 'a' toggles all, Enter confirms, 'q' aborts):")
+	for {
+		for i, wt := range planted {
+			mark := " "
+			if selected[i] {
+				mark = "x"
+			}
+			_, _ = fmt.Fprintf(out, "  %d. [%s] %s\n", i+1, mark, wt.Name)
+		}
+		_, _ = fmt.Fprint(out, "> ")
+		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				return nil, err
+			}
+			_, _ = fmt.Fprintln(out)
+			return nil, nil
+		}
+		line := strings.TrimSpace(scanner.Text())
+		switch line {
+		case "":
+			var names []string
+			for i, wt := range planted {
+				if selected[i] {
+					names = append(names, wt.Name)
+				}
+			}
+			return names, nil
+		case "q":
+			return nil, nil
+		case "a":
+			all := true
+			for _, s := range selected {
+				if !s {
+					all = false
+					break
+				}
+			}
+			for i := range selected {
+				selected[i] = !all
+			}
+			continue
+		}
+
+		// Validate the whole line before toggling so a typo doesn't apply
+		// half the toggles.
+		var toggles []int
+		valid := true
+		for _, tok := range strings.Fields(line) {
+			n, err := strconv.Atoi(tok)
+			if err != nil || n < 1 || n > len(planted) {
+				_, _ = fmt.Fprintf(out, "invalid selection: %s\n", tok)
+				valid = false
+				break
+			}
+			toggles = append(toggles, n-1)
+		}
+		if !valid {
+			continue
+		}
+		for _, i := range toggles {
+			selected[i] = !selected[i]
+		}
+	}
+}
+
+// confirmRemoval asks for a final yes/no before the destructive removal.
+// Anything other than an explicit yes (including EOF) declines.
+func confirmRemoval(scanner *bufio.Scanner, out io.Writer, names []string) (bool, error) {
+	_, _ = fmt.Fprintf(out, "Remove %d worktree(s) (%s)? [y/N] ", len(names), strings.Join(names, ", "))
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return false, err
+		}
+		_, _ = fmt.Fprintln(out)
+		return false, nil
+	}
+	answer := strings.ToLower(strings.TrimSpace(scanner.Text()))
+	return answer == "y" || answer == "yes", nil
+}
+
+func runRemoveInteractive(cfg *Config) error {
+	client := cliGitClient{}
+	worktrees, err := client.listWorktrees(cfg.RootTree)
+	if err != nil {
+		return fmt.Errorf("listing worktrees: %w", err)
+	}
+	planted := filterPlantedWorktrees(worktrees, cfg.RootTree, cfg.PlantDir)
+	if len(planted) == 0 {
+		fmt.Println("No worktrees to remove.")
+		return nil
+	}
+
+	// One scanner shared with the confirmation prompt so no buffered input
+	// is lost between the two reads.
+	scanner := bufio.NewScanner(os.Stdin)
+	names, err := pickWorktrees(scanner, os.Stdout, planted)
+	if err != nil {
+		return fmt.Errorf("reading selection: %w", err)
+	}
+	if len(names) == 0 {
+		fmt.Println("No worktrees selected.")
+		return nil
+	}
+
+	confirmed, err := confirmRemoval(scanner, os.Stdout, names)
+	if err != nil {
+		return fmt.Errorf("reading confirmation: %w", err)
+	}
+	if !confirmed {
+		fmt.Println("Aborted.")
+		return nil
+	}
+	return runRemove(cfg, names)
 }
 
 func runRemove(cfg *Config, worktreeNames []string) error {
