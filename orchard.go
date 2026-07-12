@@ -124,6 +124,24 @@ func parseWorktrees(output []byte) ([]gitWorktree, error) {
 	return worktrees, nil
 }
 
+type plantedWorktree struct {
+	Name string
+	Path string
+}
+
+// filterPlantedWorktrees returns the worktrees that orchard manages: direct
+// children of plantDir, excluding the root tree itself.
+func filterPlantedWorktrees(worktrees []gitWorktree, rootTree, plantDir string) []plantedWorktree {
+	var planted []plantedWorktree
+	for _, wt := range worktrees {
+		if wt.Path == rootTree || filepath.Dir(wt.Path) != plantDir {
+			continue
+		}
+		planted = append(planted, plantedWorktree{Name: filepath.Base(wt.Path), Path: wt.Path})
+	}
+	return planted
+}
+
 func worktreeExists(worktrees []gitWorktree, plantDir, name string) bool {
 	targetPath := filepath.Clean(filepath.Join(plantDir, name))
 	for _, wt := range worktrees {
@@ -216,7 +234,20 @@ func newRootCmd() *cobra.Command {
 		},
 	}
 
-	rootCmd.AddCommand(addCmd, removeCmd, rootPathCmd)
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List worktrees in the plant directory",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig(cmd)
+			if err != nil {
+				return err
+			}
+			return runList(cfg)
+		},
+	}
+
+	rootCmd.AddCommand(addCmd, removeCmd, rootPathCmd, listCmd)
 	return rootCmd
 }
 
@@ -303,6 +334,21 @@ func runAdd(cfg *Config, worktreeName, baseBranch string) error {
 	}
 
 	fmt.Println("Success!")
+	return nil
+}
+
+func runList(cfg *Config) error {
+	client := cliGitClient{}
+	worktrees, err := client.listWorktrees(cfg.RootTree)
+	if err != nil {
+		return fmt.Errorf("listing worktrees: %w", err)
+	}
+
+	// Print name and path only, tab-separated, so the output is easy to
+	// consume from scripts (e.g. cut, awk).
+	for _, wt := range filterPlantedWorktrees(worktrees, cfg.RootTree, cfg.PlantDir) {
+		fmt.Printf("%s\t%s\n", wt.Name, wt.Path)
+	}
 	return nil
 }
 
