@@ -61,7 +61,9 @@ Removes one or more worktrees and their associated branches. All names are valid
 orchard [--config <config_path>] remove [<worktree_name>...]
 ```
 
-When no names are given, an interactive pick list of the planted worktrees is shown. Entering numbers (several per line allowed) toggles entries, `a` toggles all, an empty line confirms the selection, and `q` aborts. A final yes/no prompt guards the removal.
+When no names are given, an interactive pick list of the planted worktrees is shown. Arrow keys (or `j`/`k`) move, `space` toggles an entry, `ctrl+a` selects all, `/` filters the list, `enter` confirms the selection, and `esc` or `ctrl+c` aborts. A final yes/no prompt guards the removal.
+
+When stdin is not a terminal — piped input, or a screen reader session — the prompts fall back to a plain numbered list: each line toggles one entry by number and `0` confirms.
 
 #### root
 
@@ -106,7 +108,7 @@ orchard [--config <config_path>] list
   ```
 
 - **Pick worktrees to remove interactively**:
-  Shows a toggle pick list of planted worktrees and removes the confirmed selection.
+  Shows a filterable pick list of planted worktrees and removes the confirmed selection.
   ```bash
   orchard remove
   ```

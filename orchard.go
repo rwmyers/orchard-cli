@@ -3,14 +3,16 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/huh"
+	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 )
 
@@ -217,7 +219,7 @@ func newRootCmd() *cobra.Command {
 				return err
 			}
 			if len(args) == 0 {
-				return runRemoveInteractive(cfg)
+				return runRemoveInteractive(cfg, newHuhPrompter())
 			}
 			return runRemove(cfg, args)
 		},
@@ -357,93 +359,123 @@ func runList(cfg *Config) error {
 	return nil
 }
 
-// pickWorktrees presents a toggle pick list of the planted worktrees and
-// returns the names left selected. Numbers (several per line allowed) toggle
-// entries, 'a' toggles all, an empty line confirms the selection, and 'q' or
-// EOF aborts with no names selected.
-func pickWorktrees(scanner *bufio.Scanner, out io.Writer, planted []plantedWorktree) ([]string, error) {
-	selected := make([]bool, len(planted))
-	_, _ = fmt.Fprintln(out, "Select worktrees to remove (numbers toggle, 'a' toggles all, Enter confirms, 'q' aborts):")
-	for {
-		for i, wt := range planted {
-			mark := " "
-			if selected[i] {
-				mark = "x"
-			}
-			_, _ = fmt.Fprintf(out, "  %d. [%s] %s\n", i+1, mark, wt.Name)
-		}
-		_, _ = fmt.Fprint(out, "> ")
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil {
-				return nil, err
-			}
-			_, _ = fmt.Fprintln(out)
-			return nil, nil
-		}
-		line := strings.TrimSpace(scanner.Text())
-		switch line {
-		case "":
-			var names []string
-			for i, wt := range planted {
-				if selected[i] {
-					names = append(names, wt.Name)
-				}
-			}
-			return names, nil
-		case "q":
-			return nil, nil
-		case "a":
-			all := true
-			for _, s := range selected {
-				if !s {
-					all = false
-					break
-				}
-			}
-			for i := range selected {
-				selected[i] = !all
-			}
-			continue
-		}
-
-		// Validate the whole line before toggling so a typo doesn't apply
-		// half the toggles.
-		var toggles []int
-		valid := true
-		for _, tok := range strings.Fields(line) {
-			n, err := strconv.Atoi(tok)
-			if err != nil || n < 1 || n > len(planted) {
-				_, _ = fmt.Fprintf(out, "invalid selection: %s\n", tok)
-				valid = false
-				break
-			}
-			toggles = append(toggles, n-1)
-		}
-		if !valid {
-			continue
-		}
-		for _, i := range toggles {
-			selected[i] = !selected[i]
-		}
-	}
+// prompter collects the interactive input for `orchard remove` when no names
+// are given. It is an interface so the removal flow can be tested without
+// standing up a terminal.
+type prompter interface {
+	PickWorktrees(planted []plantedWorktree) ([]string, error)
+	ConfirmRemoval(names []string) (bool, error)
 }
 
-// confirmRemoval asks for a final yes/no before the destructive removal.
-// Anything other than an explicit yes (including EOF) declines.
-func confirmRemoval(scanner *bufio.Scanner, out io.Writer, names []string) (bool, error) {
-	_, _ = fmt.Fprintf(out, "Remove %d worktree(s) (%s)? [y/N] ", len(names), strings.Join(names, ", "))
-	if !scanner.Scan() {
-		if err := scanner.Err(); err != nil {
-			return false, err
-		}
-		_, _ = fmt.Fprintln(out)
-		return false, nil
+// maxPickHeight caps how many rows the pick list occupies so that a long list
+// scrolls inside the viewport instead of running off the top of the terminal.
+const maxPickHeight = 12
+
+// maxConfirmNames caps how many names the confirmation lists. The list does
+// not scroll, so without a cap a large selection pushes the question itself
+// off the top of the screen.
+const maxConfirmNames = 10
+
+func confirmDescription(names []string) string {
+	if len(names) <= maxConfirmNames {
+		return strings.Join(names, "\n")
 	}
-	answer := strings.ToLower(strings.TrimSpace(scanner.Text()))
-	return answer == "y" || answer == "yes", nil
+	shown := append([]string{}, names[:maxConfirmNames]...)
+	shown = append(shown, fmt.Sprintf("... and %d more", len(names)-maxConfirmNames))
+	return strings.Join(shown, "\n")
 }
 
-func runRemoveInteractive(cfg *Config) error {
+// promptField is the part of a huh field this package uses. Both
+// *huh.MultiSelect and *huh.Confirm satisfy it.
+type promptField interface {
+	huh.Field
+	RunAccessible(w io.Writer, r io.Reader) error
+}
+
+// huhPrompter drives the prompts with huh. On a terminal the fields render as
+// a full TUI (arrow keys move, space toggles, ctrl+a selects all, / filters,
+// enter confirms). When stdin is not a terminal it falls back to huh's
+// accessible line-based mode so piped input still works.
+type huhPrompter struct {
+	in       io.Reader
+	out      io.Writer
+	terminal bool
+}
+
+func newHuhPrompter() huhPrompter {
+	return huhPrompter{in: os.Stdin, out: os.Stdout, terminal: term.IsTerminal(os.Stdin.Fd())}
+}
+
+// byteReader hands out at most one byte per Read. Accessible mode builds a
+// fresh bufio.Scanner for every prompt it issues, and a buffered reader would
+// read past the newline and swallow the input meant for the next prompt.
+// Reading a byte at a time keeps each scanner from consuming more than its own
+// line; the volume of interactive input makes the extra reads irrelevant.
+type byteReader struct{ r io.Reader }
+
+func (b byteReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return b.r.Read(p[:1])
+}
+
+func (p huhPrompter) run(field promptField) error {
+	if !p.terminal {
+		return field.RunAccessible(p.out, byteReader{r: p.in})
+	}
+	// The field's own Run() builds a form with the help footer switched off,
+	// which would leave the keybindings undiscoverable, so build it here.
+	return huh.NewForm(huh.NewGroup(field)).WithShowHelp(true).Run()
+}
+
+// PickWorktrees shows the planted worktrees as a multi-select and returns the
+// names left selected. Aborting (ctrl+c or esc) returns no names rather than
+// an error, since backing out is a normal outcome and not a failure.
+func (p huhPrompter) PickWorktrees(planted []plantedWorktree) ([]string, error) {
+	options := make([]huh.Option[string], len(planted))
+	for i, wt := range planted {
+		options[i] = huh.NewOption(wt.Name, wt.Name)
+	}
+
+	var names []string
+	field := huh.NewMultiSelect[string]().
+		Title("Select worktrees to remove").
+		Options(options...).
+		Filterable(true).
+		Height(min(len(planted)+2, maxPickHeight)).
+		Value(&names)
+
+	if err := p.run(field); err != nil {
+		if errors.Is(err, huh.ErrUserAborted) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return names, nil
+}
+
+// ConfirmRemoval asks for a final yes/no before the destructive removal.
+// Anything other than an explicit yes — including aborting — declines.
+func (p huhPrompter) ConfirmRemoval(names []string) (bool, error) {
+	var confirmed bool
+	field := huh.NewConfirm().
+		Title(fmt.Sprintf("Remove %d worktree(s) and their branches?", len(names))).
+		Description(confirmDescription(names)).
+		Affirmative("Remove").
+		Negative("Cancel").
+		Value(&confirmed)
+
+	if err := p.run(field); err != nil {
+		if errors.Is(err, huh.ErrUserAborted) {
+			return false, nil
+		}
+		return false, err
+	}
+	return confirmed, nil
+}
+
+func runRemoveInteractive(cfg *Config, p prompter) error {
 	client := cliGitClient{}
 	worktrees, err := client.listWorktrees(cfg.RootTree)
 	if err != nil {
@@ -455,10 +487,7 @@ func runRemoveInteractive(cfg *Config) error {
 		return nil
 	}
 
-	// One scanner shared with the confirmation prompt so no buffered input
-	// is lost between the two reads.
-	scanner := bufio.NewScanner(os.Stdin)
-	names, err := pickWorktrees(scanner, os.Stdout, planted)
+	names, err := p.PickWorktrees(planted)
 	if err != nil {
 		return fmt.Errorf("reading selection: %w", err)
 	}
@@ -467,7 +496,7 @@ func runRemoveInteractive(cfg *Config) error {
 		return nil
 	}
 
-	confirmed, err := confirmRemoval(scanner, os.Stdout, names)
+	confirmed, err := p.ConfirmRemoval(names)
 	if err != nil {
 		return fmt.Errorf("reading confirmation: %w", err)
 	}

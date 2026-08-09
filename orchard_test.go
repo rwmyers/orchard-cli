@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bufio"
+	"fmt"
 	"io"
 	"reflect"
 	"strings"
@@ -219,13 +219,22 @@ func TestArgValidation(t *testing.T) {
 	})
 }
 
-func TestPickWorktrees(t *testing.T) {
+// accessiblePrompter returns a prompter wired to canned input and running in
+// huh's accessible (non-terminal) mode, which is the code path taken whenever
+// stdin is not a TTY.
+func accessiblePrompter(input string) huhPrompter {
+	return huhPrompter{in: strings.NewReader(input), out: io.Discard, terminal: false}
+}
+
+func TestHuhPrompterPickWorktrees(t *testing.T) {
 	planted := []plantedWorktree{
 		{Name: "wt1", Path: "/path/to/plant/wt1"},
 		{Name: "wt2", Path: "/path/to/plant/wt2"},
 		{Name: "wt3", Path: "/path/to/plant/wt3"},
 	}
 
+	// In accessible mode each line toggles a single entry by number and 0
+	// confirms the selection.
 	tests := []struct {
 		name  string
 		input string
@@ -233,76 +242,100 @@ func TestPickWorktrees(t *testing.T) {
 	}{
 		{
 			name:  "toggle one and confirm",
-			input: "2\n\n",
+			input: "2\n0\n",
 			want:  []string{"wt2"},
 		},
 		{
-			name:  "toggle several on one line",
-			input: "1 3\n\n",
+			name:  "toggle several",
+			input: "1\n3\n0\n",
 			want:  []string{"wt1", "wt3"},
 		},
 		{
 			name:  "toggle twice deselects",
-			input: "2\n2\n\n",
+			input: "2\n2\n0\n",
 			want:  nil,
 		},
 		{
-			name:  "toggle all",
-			input: "a\n\n",
-			want:  []string{"wt1", "wt2", "wt3"},
+			name:  "selection is returned in list order",
+			input: "3\n1\n0\n",
+			want:  []string{"wt1", "wt3"},
 		},
 		{
-			name:  "toggle all twice deselects all",
-			input: "a\na\n\n",
-			want:  nil,
-		},
-		{
-			name:  "toggle all completes a partial selection",
-			input: "1\na\n\n",
-			want:  []string{"wt1", "wt2", "wt3"},
-		},
-		{
-			name:  "invalid line leaves selection unchanged",
-			input: "1 bogus\n2\n\n",
+			name:  "invalid input reprompts",
+			input: "bogus\n2\n0\n",
 			want:  []string{"wt2"},
 		},
 		{
-			name:  "out of range rejected",
-			input: "4\n0\n3\n\n",
+			name:  "out of range reprompts",
+			input: "4\n3\n0\n",
 			want:  []string{"wt3"},
 		},
 		{
-			name:  "quit aborts",
-			input: "1\nq\n",
-			want:  nil,
-		},
-		{
-			name:  "EOF aborts",
-			input: "1\n",
-			want:  nil,
-		},
-		{
 			name:  "confirm with nothing selected",
-			input: "\n",
+			input: "0\n",
 			want:  nil,
+		},
+		{
+			name:  "EOF confirms what is selected",
+			input: "1\n",
+			want:  []string{"wt1"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			scanner := bufio.NewScanner(strings.NewReader(tt.input))
-			got, err := pickWorktrees(scanner, io.Discard, planted)
+			got, err := accessiblePrompter(tt.input).PickWorktrees(planted)
 			if err != nil {
-				t.Fatalf("pickWorktrees() error = %v", err)
+				t.Fatalf("PickWorktrees() error = %v", err)
+			}
+			// An empty selection may come back as nil or an empty slice;
+			// callers only look at the length, so treat the two alike.
+			if len(got) == 0 && len(tt.want) == 0 {
+				return
 			}
 			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("pickWorktrees() = %v, want %v", got, tt.want)
+				t.Errorf("PickWorktrees() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestConfirmRemoval(t *testing.T) {
+func TestConfirmDescription(t *testing.T) {
+	t.Run("lists every name when short", func(t *testing.T) {
+		got := confirmDescription([]string{"wt1", "wt2"})
+		if got != "wt1\nwt2" {
+			t.Errorf("confirmDescription() = %q, want %q", got, "wt1\nwt2")
+		}
+	})
+
+	t.Run("summarises the tail when long", func(t *testing.T) {
+		names := make([]string, maxConfirmNames+3)
+		for i := range names {
+			names[i] = fmt.Sprintf("wt%d", i)
+		}
+		got := confirmDescription(names)
+		lines := strings.Split(got, "\n")
+		if len(lines) != maxConfirmNames+1 {
+			t.Fatalf("confirmDescription() produced %d lines, want %d", len(lines), maxConfirmNames+1)
+		}
+		if want := "... and 3 more"; lines[len(lines)-1] != want {
+			t.Errorf("last line = %q, want %q", lines[len(lines)-1], want)
+		}
+	})
+
+	t.Run("does not modify the caller's slice", func(t *testing.T) {
+		names := make([]string, maxConfirmNames+1)
+		for i := range names {
+			names[i] = fmt.Sprintf("wt%d", i)
+		}
+		confirmDescription(names)
+		if want := fmt.Sprintf("wt%d", maxConfirmNames); names[maxConfirmNames] != want {
+			t.Errorf("names[%d] = %q, want %q", maxConfirmNames, names[maxConfirmNames], want)
+		}
+	})
+}
+
+func TestHuhPrompterConfirmRemoval(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
@@ -317,13 +350,12 @@ func TestConfirmRemoval(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			scanner := bufio.NewScanner(strings.NewReader(tt.input))
-			got, err := confirmRemoval(scanner, io.Discard, []string{"wt1"})
+			got, err := accessiblePrompter(tt.input).ConfirmRemoval([]string{"wt1"})
 			if err != nil {
-				t.Fatalf("confirmRemoval() error = %v", err)
+				t.Fatalf("ConfirmRemoval() error = %v", err)
 			}
 			if got != tt.want {
-				t.Errorf("confirmRemoval() = %v, want %v", got, tt.want)
+				t.Errorf("ConfirmRemoval() = %v, want %v", got, tt.want)
 			}
 		})
 	}
