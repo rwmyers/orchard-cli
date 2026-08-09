@@ -37,6 +37,8 @@ root_tree = /absolute/path/to/root/repository
 plant_dir = /absolute/path/to/plant/directory
 ```
 
+To have one written for you, run [`orchard setup`](#setup) in the repository.
+
 ## Usage
 
 ```bash
@@ -44,6 +46,30 @@ orchard [--config <config_path>] <subcommand> [args]
 ```
 
 ### Subcommands
+
+#### setup
+
+Writes a configuration file for a repository.
+
+```bash
+orchard setup [<root_tree>] [--plant-dir <path>] [--config <config_path>] [--force] [--prune]
+```
+
+The root tree defaults to the repository containing the current directory, so `orchard setup` can be run from anywhere inside a project; pass a directory to configure that repository instead. Either way the path is resolved to the repository root.
+
+By default the two remaining questions are asked interactively: where worktrees should be planted, and where `orchard.conf` should be written. Each is a pick list of suggested paths with an `Other…` entry for anything else, followed by a summary and a final yes/no. Arrow keys (or `j`/`k`) move, `enter` selects, and `esc` or `ctrl+c` backs out without writing anything. As with `remove`, the prompts fall back to a plain numbered list when stdin is not a terminal.
+
+The suggestions cover the layouts that need no further thought — for the plant directory, the one beside the root tree and a `plants` directory next to it; for the configuration, the root tree and the global path — plus the directory the command was run from. Anything that would be rejected, such as a plant directory inside the root tree, is left out.
+
+Running setup again on a repository that is already configured starts by offering to reconfigure it, showing what the current file says; declining leaves it alone. Go ahead and the existing answers lead the pick lists, so keeping one of them is a single `enter`. The lookup covers the root tree, the working directory and the global path, so a configuration written anywhere setup could have put it is recognised.
+
+Moving the plant directory strands anything already planted in the old one: `list` and `remove` stop seeing those worktrees, while their branches carry on reserving the names, so `orchard add` refuses to reuse them. Setup therefore offers to remove them — worktree and branch, the same as `remove` — before the move. Declining is fine and the move still happens; setup then prints what it left and the command that points orchard back at it. Nothing is removed if the final confirmation is cancelled.
+
+Worktrees are only ever cleaned up when the previous configuration named the same `root_tree`, so a configuration belonging to another repository is never acted on. In a non-interactive run nothing is removed without `--prune`; setup prints the same warning instead.
+
+Supplying `--plant-dir` (or `-p`) answers the only question without an obvious default and so skips the prompts entirely, which is the way to run setup from a script. For this subcommand `--config` says where the configuration is written rather than where it is read from; without it the file goes to `<root_tree>/orchard.conf`. An existing file is left alone unless `--force` (or `-f`) is given.
+
+The plant directory is created if it does not exist. Planting inside the root tree is rejected, since it would leave the worktrees sitting untracked in the repository.
 
 #### add
 
@@ -84,6 +110,31 @@ orchard [--config <config_path>] list
 ```
 
 ### Examples
+
+- **Set a repository up interactively**:
+  Asks where worktrees should be planted and where the configuration should live, then writes it. Run again to change either answer.
+  ```bash
+  cd ~/code/my-project
+  orchard setup
+  ```
+
+- **Set a repository up without any prompts**:
+  Configures `~/code/my-project` to plant its worktrees in `~/code`, writing `~/code/my-project/orchard.conf`.
+  ```bash
+  orchard setup ~/code/my-project --plant-dir ~/code
+  ```
+
+- **Move the plant directory, clearing up what was planted in the old one**:
+  Removes the worktrees left in the previous plant directory, and their branches, before writing the new configuration.
+  ```bash
+  orchard setup --plant-dir ~/code/plants --force --prune
+  ```
+
+- **Write the configuration to the global location**:
+  Makes the configuration apply from any directory rather than only from the repository.
+  ```bash
+  orchard setup --plant-dir ~/code --config ~/.config/orchard/orchard.conf
+  ```
 
 - **Create a worktree with a new branch**:
   Creates a new worktree and branch named `my-new-feature` based on the root repository's current HEAD.

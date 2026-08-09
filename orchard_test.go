@@ -198,6 +198,8 @@ func TestArgValidation(t *testing.T) {
 		{name: "add base flag needs a value", args: []string{"add", "wt1", "--base"}, wantErr: true},
 		{name: "root with args", args: []string{"root", "extra"}, wantErr: true},
 		{name: "list with args", args: []string{"list", "extra"}, wantErr: true},
+		{name: "setup with too many args", args: []string{"setup", "one", "two"}, wantErr: true},
+		{name: "setup with an unknown flag", args: []string{"setup", "--bogus"}, wantErr: true},
 		{name: "unknown subcommand", args: []string{"bogus"}, wantErr: true},
 		{name: "help", args: []string{"--help"}, wantErr: false},
 	}
@@ -249,6 +251,19 @@ func TestArgValidation(t *testing.T) {
 		err := cmd.Execute()
 		if err == nil || !strings.Contains(err.Error(), "reading config") {
 			t.Errorf("Execute() error = %v, want config loading error", err)
+		}
+	})
+
+	t.Run("setup takes a root tree and flags", func(t *testing.T) {
+		// A nonexistent root tree fails before any prompt, proving the
+		// positional argument and the flags reach runSetup.
+		cmd := newRootCmd()
+		cmd.SetArgs([]string{"setup", "/nonexistent/repo", "--plant-dir", "/nonexistent/plant", "--force"})
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		err := cmd.Execute()
+		if err == nil || !strings.Contains(err.Error(), "/nonexistent/repo") {
+			t.Errorf("Execute() error = %v, want an error naming the root tree", err)
 		}
 	})
 

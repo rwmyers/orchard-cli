@@ -21,7 +21,25 @@ type Config struct {
 	PlantDir string
 }
 
-func readConfig(filename string) (*Config, error) {
+// configFileName is the file orchard looks for in the working directory, and
+// the name `orchard setup` writes.
+const configFileName = "orchard.conf"
+
+// globalConfigPath is the fallback configuration location, used when the
+// working directory has no orchard.conf. It returns "" when the home directory
+// cannot be determined.
+func globalConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "orchard", configFileName)
+}
+
+// parseConfig reads the key/value pairs from filename. It does not check that
+// the directories named still exist, so that `orchard setup` can report what a
+// configuration says even once it has gone stale.
+func parseConfig(filename string) (*Config, error) {
 	file, err := os.Open(filename)
 	if err != nil {
 		return nil, err
@@ -63,6 +81,15 @@ func readConfig(filename string) (*Config, error) {
 	// Clean paths
 	cfg.RootTree = filepath.Clean(cfg.RootTree)
 	cfg.PlantDir = filepath.Clean(cfg.PlantDir)
+
+	return cfg, nil
+}
+
+func readConfig(filename string) (*Config, error) {
+	cfg, err := parseConfig(filename)
+	if err != nil {
+		return nil, err
+	}
 
 	// Verify directories exist
 	if _, err := os.Stat(cfg.RootTree); os.IsNotExist(err) {
@@ -260,27 +287,57 @@ func newRootCmd() *cobra.Command {
 		},
 	}
 
-	rootCmd.AddCommand(addCmd, removeCmd, rootPathCmd, listCmd)
+	var setupOpts setupOptions
+	setupCmd := &cobra.Command{
+		Use:   "setup [<root_tree>]",
+		Short: "Write a configuration file for a repository",
+		Long: `Write an ` + configFileName + ` for a repository.
+
+The root tree defaults to the repository containing the current directory; pass
+a directory to configure that repository instead. The plant directory and the
+location of the configuration file are asked for interactively, and the plant
+directory is created if it does not exist.
+
+Supplying --plant-dir answers the only question without an obvious default and
+so skips the prompts entirely. For this subcommand --config says where the
+configuration is written rather than where it is read from.
+
+Moving the plant directory strands anything already planted in the old one,
+since orchard stops listing it while its branches stay put. Setup offers to
+remove those worktrees; --prune answers that offer up front.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Nothing here is an arg-validation failure, so runtime errors
+			// should not dump the help text.
+			cmd.SilenceUsage = true
+			if len(args) == 1 {
+				setupOpts.RootTree = args[0]
+			}
+			setupOpts.ConfigPath = configPath
+			return runSetup(setupOpts, newHuhPrompter())
+		},
+	}
+	setupCmd.Flags().StringVarP(&setupOpts.PlantDir, "plant-dir", "p", "", "directory worktrees are planted in (skips the prompts)")
+	setupCmd.Flags().BoolVarP(&setupOpts.Force, "force", "f", false, "overwrite an existing configuration file")
+	setupCmd.Flags().BoolVar(&setupOpts.Prune, "prune", false, "remove worktrees left behind in the previous plant directory")
+
+	rootCmd.AddCommand(setupCmd, addCmd, removeCmd, rootPathCmd, listCmd)
 	return rootCmd
 }
 
 func resolveConfig(configPath string) (*Config, error) {
 	actualConfigPath := configPath
 	if actualConfigPath == "" {
-		if _, err := os.Stat("orchard.conf"); err == nil {
-			actualConfigPath = "orchard.conf"
-		} else {
-			home, err := os.UserHomeDir()
-			if err == nil {
-				fallbackPath := filepath.Join(home, ".config", "orchard", "orchard.conf")
-				if _, err := os.Stat(fallbackPath); err == nil {
-					actualConfigPath = fallbackPath
-				}
+		if _, err := os.Stat(configFileName); err == nil {
+			actualConfigPath = configFileName
+		} else if global := globalConfigPath(); global != "" {
+			if _, err := os.Stat(global); err == nil {
+				actualConfigPath = global
 			}
 		}
 	}
 	if actualConfigPath == "" {
-		actualConfigPath = "orchard.conf" // Fallback to trigger file missing error in readConfig
+		actualConfigPath = configFileName // Fallback to trigger file missing error in readConfig
 	}
 
 	cfg, err := readConfig(actualConfigPath)
@@ -447,18 +504,34 @@ func newHuhPrompter() huhPrompter {
 // read past the newline and swallow the input meant for the next prompt.
 // Reading a byte at a time keeps each scanner from consuming more than its own
 // line; the volume of interactive input makes the extra reads irrelevant.
-type byteReader struct{ r io.Reader }
+//
+// Once the underlying reader is exhausted it yields one final newline before
+// reporting EOF. huh's accessible prompts re-read after rejecting a line but
+// hold on to the rejected text, so input ending straight after an invalid
+// answer would be answered with something the field cannot parse — in a select
+// that means indexing its options with -1. The trailing newline makes the end
+// of input mean "take the default" instead.
+type byteReader struct {
+	r    io.Reader
+	done bool
+}
 
-func (b byteReader) Read(p []byte) (int, error) {
+func (b *byteReader) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	return b.r.Read(p[:1])
+	n, err := b.r.Read(p[:1])
+	if n == 0 && errors.Is(err, io.EOF) && !b.done {
+		b.done = true
+		p[0] = '\n'
+		return 1, nil
+	}
+	return n, err
 }
 
 func (p huhPrompter) run(field promptField) error {
 	if !p.terminal {
-		return field.RunAccessible(p.out, byteReader{r: p.in})
+		return field.RunAccessible(p.out, &byteReader{r: p.in})
 	}
 	// The field's own Run() builds a form with the help footer switched off,
 	// which would leave the keybindings undiscoverable, so build it here.
@@ -491,15 +564,16 @@ func (p huhPrompter) PickWorktrees(planted []plantedWorktree) ([]string, error) 
 	return names, nil
 }
 
-// ConfirmRemoval asks for a final yes/no before the destructive removal.
-// Anything other than an explicit yes — including aborting — declines.
-func (p huhPrompter) ConfirmRemoval(names []string) (bool, error) {
+// confirm asks a yes/no question. Anything other than an explicit yes —
+// including aborting — declines, so backing out never triggers the action being
+// confirmed.
+func (p huhPrompter) confirm(title, description, affirmative, negative string) (bool, error) {
 	var confirmed bool
 	field := huh.NewConfirm().
-		Title(fmt.Sprintf("Remove %d worktree(s) and their branches?", len(names))).
-		Description(confirmDescription(names)).
-		Affirmative("Remove").
-		Negative("Cancel").
+		Title(title).
+		Description(description).
+		Affirmative(affirmative).
+		Negative(negative).
 		Value(&confirmed)
 
 	if err := p.run(field); err != nil {
@@ -509,6 +583,12 @@ func (p huhPrompter) ConfirmRemoval(names []string) (bool, error) {
 		return false, err
 	}
 	return confirmed, nil
+}
+
+// ConfirmRemoval asks for a final yes/no before the destructive removal.
+func (p huhPrompter) ConfirmRemoval(names []string) (bool, error) {
+	return p.confirm(fmt.Sprintf("Remove %d worktree(s) and their branches?", len(names)),
+		confirmDescription(names), "Remove", "Cancel")
 }
 
 func runRemoveInteractive(cfg *Config, p prompter) error {
@@ -567,21 +647,41 @@ func runRemove(cfg *Config, worktreeNames []string) error {
 		}
 	}
 
-	for _, name := range worktreeNames {
+	if err := removeWorktrees(cfg.RootTree, cfg.PlantDir, worktreeNames); err != nil {
+		return err
+	}
+
+	fmt.Println("Success!")
+	return nil
+}
+
+// removeWorktrees removes each named worktree from plantDir and deletes the
+// branch of the same name. The branch is only deleted if it is still there:
+// `orchard remove` has already insisted on it, but `orchard setup` clears up
+// worktrees it did not necessarily create, and a missing branch is no reason
+// to leave one of those behind.
+func removeWorktrees(rootTree, plantDir string, names []string) error {
+	client := cliGitClient{}
+	for _, name := range names {
 		// 1. Remove the worktree
-		worktreePath := filepath.Join(cfg.PlantDir, name)
+		worktreePath := filepath.Join(plantDir, name)
 		fmt.Printf("Removing worktree at %s...\n", worktreePath)
-		if err := runCmd(cfg.RootTree, "git", "worktree", "remove", "--force", worktreePath); err != nil {
+		if err := runCmd(rootTree, "git", "worktree", "remove", "--force", worktreePath); err != nil {
 			return fmt.Errorf("failed to remove worktree %q: %w", name, err)
 		}
 
 		// 2. Delete the branch
+		branchExists, err := client.BranchExists(rootTree, name)
+		if err != nil {
+			return fmt.Errorf("checking if branch exists: %w", err)
+		}
+		if !branchExists {
+			continue
+		}
 		fmt.Printf("Deleting branch %s...\n", name)
-		if err := runCmd(cfg.RootTree, "git", "branch", "-D", name); err != nil {
+		if err := runCmd(rootTree, "git", "branch", "-D", name); err != nil {
 			return fmt.Errorf("failed to delete branch %q: %w", name, err)
 		}
 	}
-
-	fmt.Println("Success!")
 	return nil
 }
