@@ -91,16 +91,24 @@ func (g cliGitClient) listWorktrees(rootTree string) ([]gitWorktree, error) {
 	return parseWorktrees(output)
 }
 
-func (g cliGitClient) WorktreeExists(rootTree, plantDir, name string) (bool, error) {
-	worktrees, err := g.listWorktrees(rootTree)
-	if err != nil {
-		return false, err
-	}
-	return worktreeExists(worktrees, plantDir, name), nil
-}
-
 func (g cliGitClient) BranchExists(rootTree string, branchName string) (bool, error) {
 	cmd := exec.Command("git", "show-ref", "--verify", "refs/heads/"+branchName)
+	cmd.Dir = rootTree
+	err := cmd.Run()
+	if err != nil {
+		if _, ok := err.(*exec.ExitError); ok {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// CommitExists reports whether ref resolves to a commit in the root tree. It
+// is checked up front so an unusable base is rejected before any worktree is
+// created rather than midway through a batch.
+func (g cliGitClient) CommitExists(rootTree string, ref string) (bool, error) {
+	cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", ref+"^{commit}")
 	cmd.Dir = rootTree
 	err := cmd.Run()
 	if err != nil {
@@ -192,22 +200,20 @@ func newRootCmd() *cobra.Command {
 		return cfg, nil
 	}
 
+	var baseRef string
 	addCmd := &cobra.Command{
-		Use:   "add <worktree_name> [<base_branch_or_commit>]",
-		Short: "Create a new worktree",
-		Args:  cobra.RangeArgs(1, 2),
+		Use:   "add <worktree_name>...",
+		Short: "Create one or more worktrees",
+		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := loadConfig(cmd)
 			if err != nil {
 				return err
 			}
-			baseBranch := ""
-			if len(args) > 1 {
-				baseBranch = args[1]
-			}
-			return runAdd(cfg, args[0], baseBranch)
+			return runAdd(cfg, args, baseRef)
 		},
 	}
+	addCmd.Flags().StringVarP(&baseRef, "base", "b", "", "branch or commit the new worktrees start from (defaults to the root tree's HEAD)")
 
 	removeCmd := &cobra.Command{
 		Use:   "remove [<worktree_name>...]",
@@ -284,25 +290,44 @@ func resolveConfig(configPath string) (*Config, error) {
 	return cfg, nil
 }
 
-func runAdd(cfg *Config, worktreeName, baseBranch string) error {
+// duplicateName returns the first name that appears more than once, or "" when
+// every name is unique.
+func duplicateName(names []string) string {
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if seen[name] {
+			return name
+		}
+		seen[name] = true
+	}
+	return ""
+}
+
+func runAdd(cfg *Config, worktreeNames []string, baseRef string) error {
 	fmt.Printf("Loaded config: root_tree=%s, plant_dir=%s\n", cfg.RootTree, cfg.PlantDir)
 
-	client := cliGitClient{}
-	exists, err := client.WorktreeExists(cfg.RootTree, cfg.PlantDir, worktreeName)
-	if err != nil {
-		return fmt.Errorf("checking if worktree exists: %w", err)
-	}
-	if exists {
-		return fmt.Errorf("worktree %q already exists", worktreeName)
+	// Validate every name before creating anything, so a bad name later in the
+	// list doesn't leave a half-planted batch behind.
+	if dup := duplicateName(worktreeNames); dup != "" {
+		return fmt.Errorf("worktree %q is named more than once", dup)
 	}
 
-	if baseBranch == "" {
-		branchExists, err := client.BranchExists(cfg.RootTree, worktreeName)
+	client := cliGitClient{}
+	worktrees, err := client.listWorktrees(cfg.RootTree)
+	if err != nil {
+		return fmt.Errorf("listing worktrees: %w", err)
+	}
+	for _, name := range worktreeNames {
+		if worktreeExists(worktrees, cfg.PlantDir, name) {
+			return fmt.Errorf("worktree %q already exists", name)
+		}
+
+		branchExists, err := client.BranchExists(cfg.RootTree, name)
 		if err != nil {
 			return fmt.Errorf("checking if branch exists: %w", err)
 		}
 		if branchExists {
-			return fmt.Errorf("branch %q already exists", worktreeName)
+			return fmt.Errorf("branch %q already exists", name)
 		}
 	}
 
@@ -316,28 +341,39 @@ func runAdd(cfg *Config, worktreeName, baseBranch string) error {
 		return fmt.Errorf("failed to update submodules in root_tree: %w", err)
 	}
 
-	// 2. Create the new worktree
-	newWorktreePath := filepath.Join(cfg.PlantDir, worktreeName)
-	fmt.Printf("Creating new worktree at %s...\n", newWorktreePath)
-
-	var gitArgs []string
-	gitArgs = append(gitArgs, "worktree", "add", newWorktreePath)
-
-	if baseBranch != "" {
-		gitArgs = append(gitArgs, baseBranch)
-	} else {
-		// Create new branch with the worktree name
-		gitArgs = append(gitArgs, "-b", worktreeName)
+	// The base is resolved after the pull, since it may be a ref that only
+	// arrives with it.
+	if baseRef != "" {
+		baseExists, err := client.CommitExists(cfg.RootTree, baseRef)
+		if err != nil {
+			return fmt.Errorf("checking base %q: %w", baseRef, err)
+		}
+		if !baseExists {
+			return fmt.Errorf("base %q is not a branch or commit in the root tree", baseRef)
+		}
 	}
 
-	if err := runCmd(cfg.RootTree, "git", gitArgs...); err != nil {
-		return fmt.Errorf("failed to create worktree: %w", err)
-	}
+	// 2. Create a worktree for each name, each on its own new branch so that a
+	// shared base can be used for the whole batch and `orchard remove` finds a
+	// branch matching the worktree name.
+	for _, name := range worktreeNames {
+		newWorktreePath := filepath.Join(cfg.PlantDir, name)
+		fmt.Printf("Creating new worktree at %s...\n", newWorktreePath)
 
-	// 3. Initialize submodules in the new worktree
-	fmt.Println("Initializing submodules in the new worktree...")
-	if err := runCmd(newWorktreePath, "git", "submodule", "update", "--init", "--recursive"); err != nil {
-		return fmt.Errorf("failed to initialize submodules in the new worktree: %w", err)
+		gitArgs := []string{"worktree", "add", "-b", name, newWorktreePath}
+		if baseRef != "" {
+			gitArgs = append(gitArgs, baseRef)
+		}
+
+		if err := runCmd(cfg.RootTree, "git", gitArgs...); err != nil {
+			return fmt.Errorf("failed to create worktree %q: %w", name, err)
+		}
+
+		// 3. Initialize submodules in the new worktree
+		fmt.Println("Initializing submodules in the new worktree...")
+		if err := runCmd(newWorktreePath, "git", "submodule", "update", "--init", "--recursive"); err != nil {
+			return fmt.Errorf("failed to initialize submodules in worktree %q: %w", name, err)
+		}
 	}
 
 	fmt.Println("Success!")

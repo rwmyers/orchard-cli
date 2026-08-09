@@ -47,11 +47,13 @@ orchard [--config <config_path>] <subcommand> [args]
 
 #### add
 
-Creates a new worktree.
+Creates one or more worktrees. All names are validated before anything is created, so a bad name later in the list does not leave a half-planted batch behind.
 
 ```bash
-orchard [--config <config_path>] add <worktree_name> [<base_branch_or_commit>]
+orchard [--config <config_path>] add [--base <branch_or_commit>] <worktree_name>...
 ```
+
+Each worktree gets a new branch named after it. Without `--base` (or `-b`) the branches start from the root tree's HEAD after it has been pulled; with `--base` they all start from the given branch or commit.
 
 #### remove
 
@@ -89,10 +91,16 @@ orchard [--config <config_path>] list
   orchard add my-new-feature
   ```
 
-- **Create a worktree based on an existing branch**:
-  Creates a new worktree checking out the existing `main` branch.
+- **Create several worktrees at once**:
+  Creates a worktree and branch for each name, all based on the root repository's current HEAD.
   ```bash
-  orchard add my-main-worktree main
+  orchard add feat-a feat-b feat-c
+  ```
+
+- **Create worktrees based on an existing branch or commit**:
+  Creates branches `hotfix-a` and `hotfix-b` starting from `origin/release`, each in its own worktree.
+  ```bash
+  orchard add hotfix-a hotfix-b --base origin/release
   ```
 
 - **Remove a worktree and its branch**:

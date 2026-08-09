@@ -163,6 +163,28 @@ func TestFilterPlantedWorktrees(t *testing.T) {
 	}
 }
 
+func TestDuplicateName(t *testing.T) {
+	tests := []struct {
+		name  string
+		names []string
+		want  string
+	}{
+		{name: "no names", names: nil, want: ""},
+		{name: "unique names", names: []string{"wt1", "wt2", "wt3"}, want: ""},
+		{name: "adjacent duplicate", names: []string{"wt1", "wt1"}, want: "wt1"},
+		{name: "separated duplicate", names: []string{"wt1", "wt2", "wt1"}, want: "wt1"},
+		{name: "first duplicate reported", names: []string{"wt2", "wt2", "wt3", "wt3"}, want: "wt2"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := duplicateName(tt.names); got != tt.want {
+				t.Errorf("duplicateName(%v) = %q, want %q", tt.names, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestArgValidation(t *testing.T) {
 	// Arg validation runs before RunE, so no config file is needed for the
 	// error cases below.
@@ -172,7 +194,8 @@ func TestArgValidation(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "add with no args", args: []string{"add"}, wantErr: true},
-		{name: "add with too many args", args: []string{"add", "wt1", "main", "extra"}, wantErr: true},
+		{name: "add with unknown flag", args: []string{"add", "wt1", "--bogus"}, wantErr: true},
+		{name: "add base flag needs a value", args: []string{"add", "wt1", "--base"}, wantErr: true},
 		{name: "root with args", args: []string{"root", "extra"}, wantErr: true},
 		{name: "list with args", args: []string{"list", "extra"}, wantErr: true},
 		{name: "unknown subcommand", args: []string{"bogus"}, wantErr: true},
@@ -191,6 +214,30 @@ func TestArgValidation(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("add accepts multiple names", func(t *testing.T) {
+		// A nonexistent config makes RunE fail at config loading, proving
+		// multiple worktree names get past arg validation.
+		cmd := newRootCmd()
+		cmd.SetArgs([]string{"add", "wt1", "wt2", "wt3", "--config", "/nonexistent/orchard.conf"})
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		err := cmd.Execute()
+		if err == nil || !strings.Contains(err.Error(), "reading config") {
+			t.Errorf("Execute() error = %v, want config loading error", err)
+		}
+	})
+
+	t.Run("add accepts a base flag", func(t *testing.T) {
+		cmd := newRootCmd()
+		cmd.SetArgs([]string{"add", "wt1", "wt2", "--base", "main", "--config", "/nonexistent/orchard.conf"})
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		err := cmd.Execute()
+		if err == nil || !strings.Contains(err.Error(), "reading config") {
+			t.Errorf("Execute() error = %v, want config loading error", err)
+		}
+	})
 
 	t.Run("remove accepts multiple args", func(t *testing.T) {
 		// A nonexistent config makes RunE fail at config loading, proving
