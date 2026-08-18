@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"fmt"
@@ -6,13 +6,15 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/rwmyers/orchard-cli/vcs"
 )
 
 func TestWorktreeExists(t *testing.T) {
 	plantDir := "/path/to/plant"
 
 	t.Run("existing worktree", func(t *testing.T) {
-		worktrees := []gitWorktree{
+		worktrees := []vcs.Worktree{
 			{Path: "/path/to/plant/wt1"},
 		}
 
@@ -23,7 +25,7 @@ func TestWorktreeExists(t *testing.T) {
 	})
 
 	t.Run("non-existing worktree", func(t *testing.T) {
-		worktrees := []gitWorktree{
+		worktrees := []vcs.Worktree{
 			{Path: "/path/to/plant/wt1"},
 		}
 
@@ -34,7 +36,7 @@ func TestWorktreeExists(t *testing.T) {
 	})
 
 	t.Run("multiple worktrees, match second", func(t *testing.T) {
-		worktrees := []gitWorktree{
+		worktrees := []vcs.Worktree{
 			{Path: "/path/to/plant/wt1"},
 			{Path: "/path/to/plant/wt2"},
 		}
@@ -46,77 +48,13 @@ func TestWorktreeExists(t *testing.T) {
 	})
 }
 
-func TestParseWorktrees(t *testing.T) {
-	tests := []struct {
-		name    string
-		input   string
-		want    []gitWorktree
-		wantErr bool
-	}{
-		{
-			name:  "empty input",
-			input: "",
-			want:  nil,
-		},
-		{
-			name: "single worktree",
-			input: `worktree /path/to/plant/wt1
-HEAD c876b767ca3a361d934aec79846c000966825c80
-branch refs/heads/wt1
-`,
-			want: []gitWorktree{
-				{Path: "/path/to/plant/wt1"},
-			},
-		},
-		{
-			name: "multiple worktrees",
-			input: `worktree /path/to/plant/wt1
-HEAD c876b767ca3a361d934aec79846c000966825c80
-branch refs/heads/wt1
-
-worktree /path/to/plant/wt2
-HEAD 123456
-branch refs/heads/wt2
-`,
-			want: []gitWorktree{
-				{Path: "/path/to/plant/wt1"},
-				{Path: "/path/to/plant/wt2"},
-			},
-		},
-		{
-			name: "prunable worktree",
-			input: `worktree /path/to/plant/wt2
-HEAD c876b767ca3a361d934aec79846c000966825c80
-branch refs/heads/wt2
-prunable gitdir file points to non-existent location
-`,
-			want: []gitWorktree{
-				{Path: "/path/to/plant/wt2"},
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseWorktrees([]byte(tt.input))
-			if (err != nil) != tt.wantErr {
-				t.Errorf("parseWorktrees() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("parseWorktrees() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestFilterPlantedWorktrees(t *testing.T) {
 	rootTree := "/path/to/plant/root"
 	plantDir := "/path/to/plant"
 
 	tests := []struct {
 		name      string
-		worktrees []gitWorktree
+		worktrees []vcs.Worktree
 		want      []plantedWorktree
 	}{
 		{
@@ -126,21 +64,21 @@ func TestFilterPlantedWorktrees(t *testing.T) {
 		},
 		{
 			name: "root tree excluded",
-			worktrees: []gitWorktree{
+			worktrees: []vcs.Worktree{
 				{Path: "/path/to/plant/root"},
 			},
 			want: nil,
 		},
 		{
 			name: "worktree outside plant dir excluded",
-			worktrees: []gitWorktree{
+			worktrees: []vcs.Worktree{
 				{Path: "/somewhere/else/wt1"},
 			},
 			want: nil,
 		},
 		{
 			name: "planted worktrees listed with names",
-			worktrees: []gitWorktree{
+			worktrees: []vcs.Worktree{
 				{Path: "/path/to/plant/root"},
 				{Path: "/path/to/plant/wt1"},
 				{Path: "/path/to/plant/wt2"},
@@ -412,7 +350,7 @@ func TestHuhPrompterConfirmRemoval(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := accessiblePrompter(tt.input).ConfirmRemoval([]string{"wt1"})
+			got, err := accessiblePrompter(tt.input).ConfirmRemoval([]string{"wt1"}, true)
 			if err != nil {
 				t.Fatalf("ConfirmRemoval() error = %v", err)
 			}

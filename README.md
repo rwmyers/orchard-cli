@@ -1,11 +1,25 @@
 # Orchard
 
-Orchard is a small Go CLI tool designed to manage and spawn Git worktrees based on a designated root repository. 
+Orchard is a small Go CLI tool designed to manage and spawn worktrees based on a designated root repository.
 
 Its primary jobs are:
-1. Performing a git update (pull and recursive submodule update) on the root repository to ensure it is up-to-date.
-2. Creating a new git worktree pointing to a target "plant" directory.
-3. Automatically updating submodules within the newly created worktree.
+1. Updating the root repository to ensure it is up-to-date.
+2. Creating a new worktree pointing to a target "plant" directory.
+3. Cleaning up worktrees, and whatever else the version control system attaches to them, when they are done with.
+
+Orchard drives **git** and **[jj](https://jj-vcs.dev)** out of the box, and is
+not tied to either. Everything that touches a repository goes through a
+*driver*, and support for another system is added by writing one, without
+changing orchard. A driver can be either a Go package compiled in
+([docs/EXTENDING.md](docs/EXTENDING.md)) or an `orchard-vcs-<name>` executable
+on `$PATH` speaking JSON ([docs/PLUGINS.md](docs/PLUGINS.md)); orchard treats
+the two alike.
+
+Not every system shares git's model, and orchard does not pretend otherwise. jj
+workspaces are not tied to bookmarks the way git worktrees are tied to branches,
+so with the jj driver orchard creates no branch, asks for none before removing,
+and deletes none afterwards — because the driver declines that capability, not
+because orchard special-cases jj.
 
 ## Installation
 
@@ -35,7 +49,17 @@ root_tree = /absolute/path/to/root/repository
 
 # Directory where new worktrees will be created
 plant_dir = /absolute/path/to/plant/directory
+
+# The version control driver that manages the root tree
+vcs = git
 ```
+
+`vcs` is optional. Without it, orchard asks each driver the binary was built
+with to recognise the root tree and takes the first that does, in alphabetical
+order by name. Set it to settle a repository more than one driver claims: a jj
+repository colocated with git is claimed by both, and alphabetical order makes
+that git unless `vcs = jj` says otherwise. [`orchard setup`](#setup) records whichever
+driver it detected, so a configuration it wrote never has to detect again.
 
 To have one written for you, run [`orchard setup`](#setup) in the repository.
 
@@ -79,19 +103,48 @@ Creates one or more worktrees. All names are validated before anything is create
 orchard [--config <config_path>] add [--base <branch_or_commit>] <worktree_name>...
 ```
 
-Each worktree gets a new branch named after it. Without `--base` (or `-b`) the branches start from the root tree's HEAD after it has been pulled; with `--base` they all start from the given branch or commit.
+With a driver that ties worktrees to branches — git does, jj does not — each
+worktree gets a new branch named after it. Without `--base` (or `-b`) the branches start from the root tree's HEAD after it has been pulled; with `--base` they all start from the given branch or commit. A driver that does not support `--base` refuses the flag rather than ignoring it, and one whose worktrees are not tied to branches simply creates no branch.
 
 #### remove
 
-Removes one or more worktrees and their associated branches. All names are validated before anything is removed.
+Removes one or more worktrees and, for a driver that ties worktrees to branches, their associated branches. All names are validated before anything is removed.
 
 ```bash
-orchard [--config <config_path>] remove [<worktree_name>...]
+orchard [--config <config_path>] remove [--check] [<worktree_name>...]
 ```
+
+`--check` refuses to remove any worktree that still holds work — uncommitted
+changes, or commits that exist on no remote — and names every offender rather
+than stopping at the first. It reports what the driver says, so a driver that
+cannot answer the question refuses the flag rather than removing unchecked.
 
 When no names are given, an interactive pick list of the planted worktrees is shown. Arrow keys (or `j`/`k`) move, `space` toggles an entry, `ctrl+a` selects all, `/` filters the list, `enter` confirms the selection, and `esc` or `ctrl+c` aborts. A final yes/no prompt guards the removal.
 
 When stdin is not a terminal — piped input, or a screen reader session — the prompts fall back to a plain numbered list: each line toggles one entry by number and `0` confirms.
+
+#### drivers
+
+Lists the version control drivers this binary was built with, and which parts of
+orchard's model each supports.
+
+```bash
+orchard drivers
+```
+
+```
+DRIVER  BRANCHES  UPDATE  BASE  IGNORE  INSPECT  SOURCE
+demo    yes       yes     yes   yes     yes      plugin /home/me/bin/orchard-vcs-demo (0.1.0)
+git     yes       yes     yes   yes     yes      built-in
+jj      no        yes     yes   no      yes      built-in
+```
+
+`BRANCHES` says whether the driver ties each worktree to a branch of the same
+name, which is what makes `orchard remove` delete one. `BASE` says whether
+`orchard add --base` is accepted; it is refused, rather than ignored, by a
+driver that cannot honour it. `INSPECT` says whether `orchard remove --check`
+is available. `SOURCE` distinguishes a driver compiled into this binary from one
+discovered on `$PATH`, and is where a plugin that fails to load shows up.
 
 #### root
 

@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""orchard-vcs-demo — a version control driver for orchard, as an executable.
+
+This is a complete, working orchard VCS plugin in a language that is not Go and
+with no dependency on orchard's source. It is backed by git, so that it can be
+run against a real repository and compared with the built-in git driver; the
+point is not what it drives but that it drives anything at all from outside the
+binary.
+
+Protocol: orchard runs this once per operation with the verb as argv[1] and a
+JSON request on stdin, and reads a JSON result from stdout.
+
+    $ echo '{"api_version": 1}' | orchard-vcs-demo describe
+    {"api_version": 1, "name": "demo", "version": "0.1.0", "capabilities": [...]}
+
+Anything written to stderr is logged by orchard and never parsed, so it is the
+place for diagnostics. A failure is a non-zero exit with {"error": "..."} on
+stdout.
+
+Install by putting it on $PATH as `orchard-vcs-demo`, then point a repository at
+it with `vcs = demo` in orchard.conf.
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+API_VERSION = 1
+VERSION = "0.1.0"
+
+# The optional parts of orchard's model this driver answers for. A Go driver
+# declares these by implementing an interface and the compiler checks it; a
+# plugin says so here, and orchard calls only the verbs that follow from it.
+# Dropping "branches" from this list is all it takes to model a system whose
+# worktrees are not tied to a named branch — orchard stops asking.
+CAPABILITIES = ["branches", "update", "base", "ignore", "inspect"]
+
+
+class Failed(Exception):
+    """An error to report to orchard rather than a crash."""
+
+
+def git(*args, cwd, check=True):
+    """Run git, returning its stdout. Diagnostics go to stderr for orchard."""
+    print(f"$ git {' '.join(args)} (in {cwd})", file=sys.stderr)
+    result = subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True
+    )
+    if result.stderr.strip():
+        print(result.stderr.strip(), file=sys.stderr)
+    if check and result.returncode != 0:
+        raise Failed(f"git {' '.join(args)} failed: {result.stderr.strip()}")
+    return result
+
+
+def succeeds(*args, cwd):
+    return git(*args, cwd=cwd, check=False).returncode == 0
+
+
+# --- verbs -----------------------------------------------------------------
+#
+# Each takes the request's params and returns the result object. They mirror
+# the methods of orchard's vcs.Driver interface one for one.
+
+
+def describe(_params, _config):
+    return {
+        "api_version": API_VERSION,
+        "name": "demo",
+        "version": VERSION,
+        "capabilities": CAPABILITIES,
+    }
+
+
+def detect(params, _config):
+    directory = params["dir"]
+    result = git("rev-parse", "--show-toplevel", cwd=directory, check=False)
+    if result.returncode != 0:
+        # Declining is the normal outcome for every driver but one, so it is a
+        # result rather than an error.
+        return {"not_repository": True}
+    return {"root": os.path.normpath(result.stdout.strip())}
+
+
+def list_worktrees(params, _config):
+    out = git("worktree", "list", "--porcelain", cwd=params["root"]).stdout
+    worktrees = []
+    for line in out.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        path = os.path.normpath(line[len("worktree "):])
+        worktrees.append({"name": os.path.basename(path), "path": path})
+    return {"worktrees": worktrees}
+
+
+def add_worktree(params, _config):
+    args = ["worktree", "add", "-b", params["name"], params["path"]]
+    if params.get("base"):
+        args.append(params["base"])
+    git(*args, cwd=params["root"])
+    git("submodule", "update", "--init", "--recursive", cwd=params["path"])
+    return {}
+
+
+def remove_worktree(params, _config):
+    git("worktree", "remove", "--force", params["path"], cwd=params["root"])
+    # Orchard's contract is that nothing is left at the path. git worktree
+    # remove already does that, but saying so costs nothing and a driver whose
+    # tool leaves the directory behind would clean up here.
+    shutil.rmtree(params["path"], ignore_errors=True)
+    return {}
+
+
+def branch_exists(params, _config):
+    return {
+        "exists": succeeds(
+            "show-ref", "--verify", "refs/heads/" + params["name"], cwd=params["root"]
+        )
+    }
+
+
+def delete_branch(params, _config):
+    git("branch", "-D", params["name"], cwd=params["root"])
+    return {}
+
+
+def update_root(params, _config):
+    git("pull", cwd=params["root"])
+    git("submodule", "update", "--init", "--recursive", cwd=params["root"])
+    return {}
+
+
+def base_exists(params, _config):
+    return {
+        "exists": succeeds(
+            "rev-parse", "--verify", "--quiet", params["base"] + "^{commit}",
+            cwd=params["root"],
+        )
+    }
+
+
+def ignores(params, _config):
+    return {
+        "ignored": succeeds(
+            "check-ignore", "--quiet", "--", params["path"], cwd=params["root"]
+        )
+    }
+
+
+def inspect(params, _config):
+    """Report what removing this worktree would destroy.
+
+    Orchard asks before reclaiming a worktree on its own initiative, so the
+    conservative answer is the safe one: anything unknown counts as work.
+    """
+    path = params["worktree"]["path"]
+    status = git("status", "--porcelain", cwd=path).stdout
+    unpushed = git("log", "--oneline", "HEAD", "--not", "--remotes", cwd=path).stdout
+    return {
+        "dirty": bool(status.strip()),
+        "unpublished": bool(unpushed.strip()),
+    }
+
+
+VERBS = {
+    "describe": describe,
+    "detect": detect,
+    "list-worktrees": list_worktrees,
+    "add-worktree": add_worktree,
+    "remove-worktree": remove_worktree,
+    "branch-exists": branch_exists,
+    "delete-branch": delete_branch,
+    "update-root": update_root,
+    "base-exists": base_exists,
+    "ignores": ignores,
+    "inspect": inspect,
+}
+
+
+def main():
+    if len(sys.argv) != 2:
+        fail("expected exactly one argument, the verb")
+    verb = sys.argv[1]
+
+    handler = VERBS.get(verb)
+    if handler is None:
+        fail(f"unknown verb: {verb}")
+
+    raw = sys.stdin.read()
+    request = json.loads(raw) if raw.strip() else {}
+
+    # Refusing a request from an orchard speaking a protocol this does not
+    # understand is the plugin's half of the version negotiation.
+    api = request.get("api_version", API_VERSION)
+    if api != API_VERSION:
+        fail(f"orchard speaks api version {api}, this plugin speaks {API_VERSION}")
+
+    try:
+        result = handler(request.get("params") or {}, request.get("config") or {})
+    except Failed as err:
+        fail(str(err))
+    except Exception as err:  # noqa: BLE001 - any crash must still be a clean reply
+        fail(f"{type(err).__name__}: {err}")
+
+    json.dump(result, sys.stdout)
+    sys.stdout.write("\n")
+
+
+def fail(message):
+    json.dump({"error": message}, sys.stdout)
+    sys.stdout.write("\n")
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

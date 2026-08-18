@@ -1,14 +1,14 @@
-package main
+package cli
 
 import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/huh"
+	"github.com/rwmyers/orchard-cli/vcs"
 )
 
 // setupOptions carries what `orchard setup` was given on the command line.
@@ -29,6 +29,11 @@ type setupPlan struct {
 	RootTree   string
 	PlantDir   string
 	ConfigPath string
+	// VCS is the name of the driver that recognised the root tree. It is
+	// written into the configuration so that later commands do not have to
+	// detect it again, and so that a root tree more than one driver would
+	// claim keeps the answer setup arrived at.
+	VCS string
 }
 
 // setupPrompter collects the interactive input for `orchard setup`. It is an
@@ -157,60 +162,47 @@ func isInside(dir, path string) bool {
 }
 
 // resolveRootTree turns the directory setup was pointed at into the root of the
-// git repository containing it, so that running `orchard setup` from a
-// subdirectory configures the repository rather than the subdirectory.
-func resolveRootTree(dir string) (string, error) {
+// repository containing it, so that running `orchard setup` from a subdirectory
+// configures the repository rather than the subdirectory. It returns the driver
+// that recognised the repository along with its root, since that is the one
+// answer setup records without asking.
+func resolveRootTree(dir string) (vcs.Driver, string, error) {
 	if dir == "" {
 		wd, err := os.Getwd()
 		if err != nil {
-			return "", fmt.Errorf("determining the current directory: %w", err)
+			return nil, "", fmt.Errorf("determining the current directory: %w", err)
 		}
 		dir = wd
 	}
 	abs, err := absPath(dir)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	info, err := os.Stat(abs)
 	if err != nil {
-		return "", fmt.Errorf("reading %s: %w", abs, err)
+		return nil, "", fmt.Errorf("reading %s: %w", abs, err)
 	}
 	if !info.IsDir() {
-		return "", fmt.Errorf("%s is not a directory", abs)
+		return nil, "", fmt.Errorf("%s is not a directory", abs)
 	}
 
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	cmd.Dir = abs
-	output, err := cmd.Output()
+	driver, root, err := vcs.Detect(abs)
 	if err != nil {
-		// A bare repository has no toplevel, and so fails the same way a
-		// directory outside any repository does. Saying which it is saves the
-		// user guessing at an error that looks plainly wrong to them.
-		if isBareRepository(abs) {
-			return "", fmt.Errorf("%s is a bare repository; orchard needs a repository with a worktree", abs)
-		}
-		return "", fmt.Errorf("%s is not a git repository", abs)
+		return nil, "", err
 	}
-	return filepath.Clean(strings.TrimSpace(string(output))), nil
+	return driver, filepath.Clean(root), nil
 }
 
-// isBareRepository reports whether dir is inside a repository that has no
-// worktree.
-func isBareRepository(dir string) bool {
-	cmd := exec.Command("git", "rev-parse", "--is-bare-repository")
-	cmd.Dir = dir
-	output, err := cmd.Output()
-	if err != nil {
+// driverIgnores reports whether the repository's ignore rules already cover
+// path. A driver that cannot answer is taken to mean "not ignored", which at
+// worst produces a hint the user does not need.
+func driverIgnores(driver vcs.Driver, rootTree, path string) bool {
+	ignorer, ok := driver.(vcs.Ignorer)
+	if !ok {
 		return false
 	}
-	return strings.TrimSpace(string(output)) == "true"
-}
-
-// gitIgnores reports whether the repository's ignore rules already cover path.
-func gitIgnores(rootTree, path string) bool {
-	cmd := exec.Command("git", "check-ignore", "--quiet", "--", path)
-	cmd.Dir = rootTree
-	return cmd.Run() == nil
+	ignored, err := ignorer.Ignores(rootTree, path)
+	return err == nil && ignored
 }
 
 // dedupePaths drops repeats while keeping the first occurrence, so that a
@@ -304,11 +296,11 @@ func existingSetup(rootTree, workDir, explicit string) (string, *Config) {
 // tree: a configuration found in the working directory or at the global path
 // may well belong to another repository, whose worktrees are none of setup's
 // business.
-func strandedWorktrees(rootTree string, previous *Config, plantDir string) []plantedWorktree {
+func strandedWorktrees(driver vcs.Driver, rootTree string, previous *Config, plantDir string) []plantedWorktree {
 	if previous == nil || previous.RootTree != rootTree || previous.PlantDir == plantDir {
 		return nil
 	}
-	worktrees, err := cliGitClient{}.listWorktrees(rootTree)
+	worktrees, err := driver.ListWorktrees(rootTree)
 	if err != nil {
 		return nil
 	}
@@ -342,7 +334,10 @@ root_tree = %s
 
 # The directory new worktrees are planted in.
 plant_dir = %s
-`, plan.RootTree, plan.PlantDir)
+
+# The version control driver that manages the root tree.
+vcs = %s
+`, plan.RootTree, plan.PlantDir, plan.VCS)
 }
 
 // checkPlan rejects layouts orchard cannot manage, before anything is created.
@@ -358,10 +353,11 @@ func checkPlan(plan setupPlan) error {
 
 // setupSummary describes the plan for the confirmation prompt, calling out
 // everything that happens to the filesystem beyond writing the file itself.
-func setupSummary(plan setupPlan, plantDirExists, configExists bool, pruning []plantedWorktree) string {
+func setupSummary(plan setupPlan, plantDirExists, configExists bool, pruning []plantedWorktree, withBranches bool) string {
 	lines := []string{
 		"root_tree = " + plan.RootTree,
 		"plant_dir = " + plan.PlantDir,
+		"vcs = " + plan.VCS,
 	}
 	if !plantDirExists {
 		lines = append(lines, "", plan.PlantDir+" will be created.")
@@ -370,16 +366,20 @@ func setupSummary(plan setupPlan, plantDirExists, configExists bool, pruning []p
 		lines = append(lines, "", plan.ConfigPath+" already exists and will be replaced.")
 	}
 	if len(pruning) > 0 {
-		lines = append(lines, "", fmt.Sprintf("%d worktree(s) and their branches will be removed first:", len(pruning)),
+		lines = append(lines, "", fmt.Sprintf("%d %s will be removed first:", len(pruning), removalSubject(withBranches)),
 			confirmDescription(worktreeNames(pruning)))
 	}
 	return strings.Join(lines, "\n")
 }
 
 // strandedSummary lists the worktrees a move would leave behind, and where.
-func strandedSummary(previousPlantDir string, stranded []plantedWorktree) string {
-	return fmt.Sprintf("They stay in %s, where orchard can no longer see them, and their branches keep the names reserved.\n\n%s",
-		previousPlantDir, confirmDescription(worktreeNames(stranded)))
+func strandedSummary(previousPlantDir string, stranded []plantedWorktree, withBranches bool) string {
+	reserved := ""
+	if withBranches {
+		reserved = ", and their branches keep the names reserved"
+	}
+	return fmt.Sprintf("They stay in %s, where orchard can no longer see them%s.\n\n%s",
+		previousPlantDir, reserved, confirmDescription(worktreeNames(stranded)))
 }
 
 // setupHints explains what the chosen location means for day-to-day use: how
@@ -433,10 +433,11 @@ func resolveConfigDestination(path string) (string, error) {
 }
 
 func runSetup(opts setupOptions, p setupPrompter) error {
-	rootTree, err := resolveRootTree(opts.RootTree)
+	driver, rootTree, err := resolveRootTree(opts.RootTree)
 	if err != nil {
 		return err
 	}
+	caps := vcs.CapabilitiesOf(driver)
 	// The directory the command was run from is worth offering as an answer to
 	// both questions. It is not fatal for it to be unavailable.
 	workDir, err := os.Getwd()
@@ -511,7 +512,7 @@ func runSetup(opts setupOptions, p setupPrompter) error {
 		configPath = filepath.Join(rootTree, configFileName)
 	}
 
-	plan := setupPlan{RootTree: rootTree}
+	plan := setupPlan{RootTree: rootTree, VCS: driver.Name()}
 	if plan.PlantDir, err = absPath(plantDir); err != nil {
 		return err
 	}
@@ -532,12 +533,12 @@ func runSetup(opts setupOptions, p setupPrompter) error {
 	}
 
 	// Moving the plant directory strands whatever is planted in the old one.
-	stranded := strandedWorktrees(rootTree, existing, plan.PlantDir)
+	stranded := strandedWorktrees(driver, rootTree, existing, plan.PlantDir)
 	prune := opts.Prune
 	if len(stranded) > 0 && !prune && interactive {
 		prune, err = p.ConfirmPrune(
 			fmt.Sprintf("Remove the %d worktree(s) planted in the previous directory?", len(stranded)),
-			strandedSummary(existing.PlantDir, stranded))
+			strandedSummary(existing.PlantDir, stranded, caps.Branches))
 		if err != nil {
 			return fmt.Errorf("reading confirmation: %w", err)
 		}
@@ -551,8 +552,11 @@ func runSetup(opts setupOptions, p setupPrompter) error {
 		for _, name := range worktreeNames(stranded) {
 			fmt.Printf("  %s\n", name)
 		}
-		fmt.Printf("Their branches keep those names reserved. To reach them again, point orchard back at that\n"+
-			"directory with `orchard setup %s --plant-dir %s --force`.\n", rootTree, existing.PlantDir)
+		if caps.Branches {
+			fmt.Println("Their branches keep those names reserved.")
+		}
+		fmt.Printf("To reach them again, point orchard back at that directory with\n"+
+			"`orchard setup %s --plant-dir %s --force`.\n", rootTree, existing.PlantDir)
 		if !interactive {
 			fmt.Println("Pass --prune to remove them instead.")
 		}
@@ -561,7 +565,7 @@ func runSetup(opts setupOptions, p setupPrompter) error {
 
 	if interactive {
 		confirmed, err := p.ConfirmSetup(fmt.Sprintf("Write %s?", plan.ConfigPath),
-			setupSummary(plan, plantDirExists, configExists, stranded))
+			setupSummary(plan, plantDirExists, configExists, stranded, caps.Branches))
 		if err != nil {
 			return fmt.Errorf("reading confirmation: %w", err)
 		}
@@ -577,7 +581,7 @@ func runSetup(opts setupOptions, p setupPrompter) error {
 	// that goes wrong leaves the old configuration in place and the worktrees
 	// still reachable through `orchard remove`.
 	if len(stranded) > 0 {
-		if err := removeWorktrees(rootTree, existing.PlantDir, worktreeNames(stranded)); err != nil {
+		if err := removeWorktrees(driver, rootTree, existing.PlantDir, worktreeNames(stranded)); err != nil {
 			return err
 		}
 	}
@@ -587,7 +591,7 @@ func runSetup(opts setupOptions, p setupPrompter) error {
 	}
 
 	fmt.Printf("Wrote %s\n\n%s\n", plan.ConfigPath, renderConfig(plan))
-	for _, hint := range setupHints(plan, gitIgnores(plan.RootTree, plan.ConfigPath)) {
+	for _, hint := range setupHints(plan, driverIgnores(driver, plan.RootTree, plan.ConfigPath)) {
 		fmt.Println(hint)
 	}
 	return nil

@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"os"
@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/rwmyers/orchard-cli/vcs/git"
 )
 
 // tempRepo creates an empty git repository and returns its path with symlinks
@@ -142,7 +144,7 @@ func TestResolveRootTree(t *testing.T) {
 		if err := os.MkdirAll(sub, 0o755); err != nil {
 			t.Fatalf("MkdirAll: %v", err)
 		}
-		got, err := resolveRootTree(sub)
+		_, got, err := resolveRootTree(sub)
 		if err != nil {
 			t.Fatalf("resolveRootTree() error = %v", err)
 		}
@@ -158,7 +160,7 @@ func TestResolveRootTree(t *testing.T) {
 		if err := exec.Command("git", "-C", outside, "rev-parse", "--show-toplevel").Run(); err == nil {
 			t.Skip("the temporary directory is inside a git repository")
 		}
-		if _, err := resolveRootTree(outside); err == nil {
+		if _, _, err := resolveRootTree(outside); err == nil {
 			t.Errorf("resolveRootTree(%q) error = nil, want an error", outside)
 		}
 	})
@@ -168,14 +170,14 @@ func TestResolveRootTree(t *testing.T) {
 		if out, err := exec.Command("git", "init", "--quiet", "--bare", bare).CombinedOutput(); err != nil {
 			t.Fatalf("git init --bare: %v: %s", err, out)
 		}
-		_, err := resolveRootTree(bare)
+		_, _, err := resolveRootTree(bare)
 		if err == nil || !strings.Contains(err.Error(), "bare repository") {
 			t.Errorf("resolveRootTree(%q) error = %v, want it to name the bare repository", bare, err)
 		}
 	})
 
 	t.Run("a missing directory is rejected", func(t *testing.T) {
-		if _, err := resolveRootTree(filepath.Join(repo, "nope")); err == nil {
+		if _, _, err := resolveRootTree(filepath.Join(repo, "nope")); err == nil {
 			t.Errorf("resolveRootTree() error = nil, want an error")
 		}
 	})
@@ -185,7 +187,7 @@ func TestResolveRootTree(t *testing.T) {
 		if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
-		if _, err := resolveRootTree(file); err == nil {
+		if _, _, err := resolveRootTree(file); err == nil {
 			t.Errorf("resolveRootTree(%q) error = nil, want an error", file)
 		}
 	})
@@ -454,32 +456,32 @@ func TestRenderConfigRoundTrips(t *testing.T) {
 }
 
 func TestSetupSummary(t *testing.T) {
-	plan := setupPlan{RootTree: "/code/repo", PlantDir: "/code", ConfigPath: "/code/repo/orchard.conf"}
+	plan := setupPlan{RootTree: "/code/repo", PlantDir: "/code", ConfigPath: "/code/repo/orchard.conf", VCS: "git"}
 
-	t.Run("lists the configured paths", func(t *testing.T) {
-		got := setupSummary(plan, true, false, nil)
-		want := "root_tree = /code/repo\nplant_dir = /code"
+	t.Run("lists the configured paths and the driver", func(t *testing.T) {
+		got := setupSummary(plan, true, false, nil, true)
+		want := "root_tree = /code/repo\nplant_dir = /code\nvcs = git"
 		if got != want {
 			t.Errorf("setupSummary() = %q, want %q", got, want)
 		}
 	})
 
 	t.Run("warns that the plant directory is created", func(t *testing.T) {
-		got := setupSummary(plan, false, false, nil)
+		got := setupSummary(plan, false, false, nil, true)
 		if !strings.Contains(got, "/code will be created.") {
 			t.Errorf("setupSummary() = %q, want it to mention creating the plant directory", got)
 		}
 	})
 
 	t.Run("warns about replacing an existing file", func(t *testing.T) {
-		got := setupSummary(plan, true, true, nil)
+		got := setupSummary(plan, true, true, nil, true)
 		if !strings.Contains(got, "already exists and will be replaced.") {
 			t.Errorf("setupSummary() = %q, want it to mention the overwrite", got)
 		}
 	})
 
 	t.Run("lists the worktrees being removed", func(t *testing.T) {
-		got := setupSummary(plan, true, true, []plantedWorktree{{Name: "wt1"}, {Name: "wt2"}})
+		got := setupSummary(plan, true, true, []plantedWorktree{{Name: "wt1"}, {Name: "wt2"}}, true)
 		if !strings.Contains(got, "2 worktree(s) and their branches will be removed first:") {
 			t.Errorf("setupSummary() = %q, want it to count the removals", got)
 		}
@@ -490,7 +492,7 @@ func TestSetupSummary(t *testing.T) {
 }
 
 func TestStrandedSummary(t *testing.T) {
-	got := strandedSummary("/old/plants", []plantedWorktree{{Name: "wt1"}, {Name: "wt2"}})
+	got := strandedSummary("/old/plants", []plantedWorktree{{Name: "wt1"}, {Name: "wt2"}}, true)
 	if !strings.Contains(got, "/old/plants") {
 		t.Errorf("strandedSummary() = %q, want it to name the previous directory", got)
 	}
@@ -997,16 +999,16 @@ func plantRepo(t *testing.T, names ...string) (repo, plantDir string) {
 // planted reports the names orchard would list for a plant directory.
 func planted(t *testing.T, repo, plantDir string) []string {
 	t.Helper()
-	worktrees, err := cliGitClient{}.listWorktrees(repo)
+	worktrees, err := git.Driver{}.ListWorktrees(repo)
 	if err != nil {
-		t.Fatalf("listWorktrees: %v", err)
+		t.Fatalf("ListWorktrees: %v", err)
 	}
 	return worktreeNames(filterPlantedWorktrees(worktrees, repo, plantDir))
 }
 
 func branchExists(t *testing.T, repo, name string) bool {
 	t.Helper()
-	exists, err := cliGitClient{}.BranchExists(repo, name)
+	exists, err := git.Driver{}.BranchExists(repo, name)
 	if err != nil {
 		t.Fatalf("BranchExists: %v", err)
 	}
@@ -1018,7 +1020,7 @@ func TestStrandedWorktrees(t *testing.T) {
 	previous := &Config{RootTree: repo, PlantDir: plantDir}
 
 	t.Run("lists what a move would leave behind", func(t *testing.T) {
-		got := worktreeNames(strandedWorktrees(repo, previous, "/somewhere/else"))
+		got := worktreeNames(strandedWorktrees(git.Driver{}, repo, previous, "/somewhere/else"))
 		want := []string{"wt1", "wt2"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("strandedWorktrees() = %v, want %v", got, want)
@@ -1026,20 +1028,20 @@ func TestStrandedWorktrees(t *testing.T) {
 	})
 
 	t.Run("nothing is stranded when the directory is unchanged", func(t *testing.T) {
-		if got := strandedWorktrees(repo, previous, plantDir); got != nil {
+		if got := strandedWorktrees(git.Driver{}, repo, previous, plantDir); got != nil {
 			t.Errorf("strandedWorktrees() = %v, want nothing", got)
 		}
 	})
 
 	t.Run("nothing is stranded without a previous configuration", func(t *testing.T) {
-		if got := strandedWorktrees(repo, nil, "/somewhere/else"); got != nil {
+		if got := strandedWorktrees(git.Driver{}, repo, nil, "/somewhere/else"); got != nil {
 			t.Errorf("strandedWorktrees() = %v, want nothing", got)
 		}
 	})
 
 	t.Run("another repository's worktrees are left alone", func(t *testing.T) {
 		other := &Config{RootTree: "/some/other/repo", PlantDir: plantDir}
-		if got := strandedWorktrees(repo, other, "/somewhere/else"); got != nil {
+		if got := strandedWorktrees(git.Driver{}, repo, other, "/somewhere/else"); got != nil {
 			t.Errorf("strandedWorktrees() = %v, want nothing for another repository", got)
 		}
 	})
