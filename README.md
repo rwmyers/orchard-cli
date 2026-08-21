@@ -23,13 +23,27 @@ because orchard special-cases jj.
 
 ## Installation
 
-To compile and install the `orchard` command globally to your `$GOPATH/bin` (usually `~/go/bin`), run the following command from the `orchard-cli` directory:
+Both routes below install the `orchard` command into your `$GOPATH/bin`
+(usually `~/go/bin`). Make sure your shell's `PATH` includes that directory to
+run it globally.
+
+### To use orchard
+
+No checkout required — this is the one you want:
 
 ```bash
-go install
+go install github.com/rwmyers/orchard-cli/cmd/orchard@latest
 ```
 
-Make sure your shell's `PATH` includes `~/go/bin` to run it globally.
+Replace `@latest` with a tag to pin a version.
+
+### To work on orchard
+
+From a clone of this repository, to install what is in your working tree:
+
+```bash
+make install
+```
 
 ## Configuration
 

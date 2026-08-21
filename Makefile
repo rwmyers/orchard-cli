@@ -1,4 +1,4 @@
-.PHONY: fmt vet test lint example check
+.PHONY: fmt vet test lint example check install
 
 # The examples are outside the main module, so the ./... targets below do not
 # reach them. They are checked explicitly, since they are what breaks when the
@@ -30,3 +30,7 @@ example:
 	@echo '{"api_version":1}' | ./$(PLUGIN_EXAMPLE) describe >/dev/null
 
 check: fmt vet test example lint
+
+# cmd/orchard, not the module root, so the binary is orchard and not orchard-cli.
+install:
+	go install ./cmd/orchard
